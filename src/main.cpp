@@ -3,12 +3,17 @@
 #include <ESPAsyncWebServer.h>
 #include <ESPAsyncWiFiManager.h>
 #include <Preferences.h>
+#include <U8g2lib.h>
 #include <WiFi.h>
+#include <Wire.h>
 
-// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider and a 2N7000 open-drain
-// driver on the fan's PWM pin.
+// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider, a 2N7000 open-drain
+// driver on the fan's PWM pin, a hardware-I2C OLED (D4/D5), and two
+// momentary buttons to nudge the setpoint locally.
 constexpr uint8_t THERMISTOR_PIN = D0;
 constexpr uint8_t FAN_PIN = D1;
+constexpr uint8_t BUTTON_UP_PIN = D2;
+constexpr uint8_t BUTTON_DOWN_PIN = D3;
 
 constexpr char SETUP_AP_NAME[] = "AD5X-Chamber-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "chamber123";
@@ -31,10 +36,13 @@ constexpr float MIN_FAN_RAMP_PERCENT = 20.0f;
 constexpr uint32_t FAN_PWM_FREQUENCY_HZ = 25000;
 constexpr uint8_t FAN_PWM_RESOLUTION_BITS = 8;
 constexpr unsigned long SAMPLE_INTERVAL_MS = 2000;
+constexpr float SETPOINT_STEP_C = 0.5f;
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 250;
 
 AsyncWebServer server(80);
 DNSServer dns;
 Preferences preferences;
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 float setpointC = DEFAULT_SETPOINT_C;
 float topOffsetC = DEFAULT_TOP_OFFSET_C;
 float bottomOffsetC = DEFAULT_BOTTOM_OFFSET_C;
@@ -42,6 +50,8 @@ float maxFanSpeedPercent = DEFAULT_MAX_FAN_SPEED_PERCENT;
 float temperatureC = NAN;
 uint8_t fanDutyPercent = 0;
 unsigned long lastSampleMs = 0;
+unsigned long lastButtonUpMs = 0;
+unsigned long lastButtonDownMs = 0;
 
 float readTemperatureC() {
   const int raw = analogRead(THERMISTOR_PIN);
@@ -90,6 +100,35 @@ void persistSettings() {
   preferences.putFloat("maxFanSpeed", maxFanSpeedPercent);
 }
 
+void updateDisplay() {
+  display.firstPage();
+  do {
+    display.setFont(u8g2_font_7x13_mf);
+    display.drawStr(0, 13, ("Set:  " + String(setpointC, 1) + " C").c_str());
+    display.drawStr(0, 30, (isnan(temperatureC) ? "Now:  fault" : "Now:  " + String(temperatureC, 1) + " C").c_str());
+    display.drawStr(0, 47, ("Fan:  " + (fanDutyPercent == 0 ? String("idle") : String(fanDutyPercent) + "%")).c_str());
+    display.drawStr(0, 62, WiFi.localIP().toString().c_str());
+  } while (display.nextPage());
+}
+
+void handleButtons() {
+  const unsigned long now = millis();
+  if (digitalRead(BUTTON_UP_PIN) == LOW && now - lastButtonUpMs >= BUTTON_DEBOUNCE_MS) {
+    lastButtonUpMs = now;
+    setpointC = constrain(setpointC + SETPOINT_STEP_C, SETPOINT_MIN_C, SETPOINT_MAX_C);
+    persistSettings();
+    updateFan();
+    updateDisplay();
+  }
+  if (digitalRead(BUTTON_DOWN_PIN) == LOW && now - lastButtonDownMs >= BUTTON_DEBOUNCE_MS) {
+    lastButtonDownMs = now;
+    setpointC = constrain(setpointC - SETPOINT_STEP_C, SETPOINT_MIN_C, SETPOINT_MAX_C);
+    persistSettings();
+    updateFan();
+    updateDisplay();
+  }
+}
+
 String page() {
   const String temperature = isnan(temperatureC) ? "Sensor fault" : String(temperatureC, 1) + " &deg;C";
   const String state = fanDutyPercent == 0 ? String("IDLE") : String(fanDutyPercent) + "% speed";
@@ -134,6 +173,18 @@ void setup() {
   ledcWrite(FAN_PIN, 0);
   analogReadResolution(12);
 
+  pinMode(BUTTON_UP_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);
+
+  Wire.begin();
+  display.begin();
+  display.setFont(u8g2_font_7x13_mf);
+  display.firstPage();
+  do {
+    display.drawStr(0, 13, "AD5X Chamber");
+    display.drawStr(0, 30, "Connecting Wi-Fi...");
+  } while (display.nextPage());
+
   preferences.begin("chamber", false);
   setpointC = preferences.getFloat("setpoint", DEFAULT_SETPOINT_C);
   topOffsetC = preferences.getFloat("topOffset", DEFAULT_TOP_OFFSET_C);
@@ -159,10 +210,13 @@ void setup() {
 }
 
 void loop() {
+  handleButtons();
+
   if (millis() - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = millis();
     temperatureC = readTemperatureC();
     updateFan();
+    updateDisplay();
     Serial.printf("Temperature: %.1f C, fan: %u%%\n", temperatureC, fanDutyPercent);
   }
 }
