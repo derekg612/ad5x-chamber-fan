@@ -7,8 +7,8 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider, a 2N7000 open-drain
-// driver on the fan's PWM pin, a hardware-I2C OLED (D4/D5), and two
+// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider, a BC337 low-side
+// switch on the fan's ground return, a hardware-I2C OLED (D4/D5), and two
 // momentary buttons to nudge the setpoint locally.
 constexpr uint8_t THERMISTOR_PIN = D0;
 constexpr uint8_t FAN_PIN = D1;
@@ -27,14 +27,6 @@ constexpr float SETPOINT_MAX_C = 60.0f;
 constexpr float DEFAULT_SETPOINT_C = 35.0f;
 constexpr float DEFAULT_TOP_OFFSET_C = 3.0f;
 constexpr float DEFAULT_BOTTOM_OFFSET_C = 1.0f;
-constexpr float MAX_FAN_SPEED_MIN_PERCENT = 10.0f;
-constexpr float MAX_FAN_SPEED_MAX_PERCENT = 100.0f;
-constexpr float DEFAULT_MAX_FAN_SPEED_PERCENT = 100.0f;
-// Most small DC fans stall or stutter below this duty, so once the fan is
-// asked to run at all it ramps from this floor, not from zero.
-constexpr float MIN_FAN_RAMP_PERCENT = 20.0f;
-constexpr uint32_t FAN_PWM_FREQUENCY_HZ = 25000;
-constexpr uint8_t FAN_PWM_RESOLUTION_BITS = 8;
 constexpr unsigned long SAMPLE_INTERVAL_MS = 2000;
 constexpr float SETPOINT_STEP_C = 0.5f;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 250;
@@ -46,9 +38,8 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 float setpointC = DEFAULT_SETPOINT_C;
 float topOffsetC = DEFAULT_TOP_OFFSET_C;
 float bottomOffsetC = DEFAULT_BOTTOM_OFFSET_C;
-float maxFanSpeedPercent = DEFAULT_MAX_FAN_SPEED_PERCENT;
 float temperatureC = NAN;
-uint8_t fanDutyPercent = 0;
+bool fanOn = false;
 unsigned long lastSampleMs = 0;
 unsigned long lastButtonUpMs = 0;
 unsigned long lastButtonDownMs = 0;
@@ -69,35 +60,19 @@ float readTemperatureC() {
 void updateFan() {
   const float topC = setpointC + topOffsetC;
   const float bottomC = setpointC - bottomOffsetC;
-  float rampPercent;
 
-  if (isnan(temperatureC)) {
-    // Sensor fault: ignore the configured cap and force full ventilation.
-    rampPercent = 100.0f;
+  if (isnan(temperatureC) || temperatureC >= topC) {
+    fanOn = true;
   } else if (temperatureC <= bottomC) {
-    rampPercent = 0.0f;
-  } else if (temperatureC >= topC) {
-    rampPercent = maxFanSpeedPercent;
-  } else {
-    const float floorPercent = min(MIN_FAN_RAMP_PERCENT, maxFanSpeedPercent);
-    const float fraction = (temperatureC - bottomC) / (topC - bottomC);
-    rampPercent = floorPercent + fraction * (maxFanSpeedPercent - floorPercent);
+    fanOn = false;
   }
-
-  fanDutyPercent = static_cast<uint8_t>(lroundf(constrain(rampPercent, 0.0f, 100.0f)));
-
-  // The 2N7000 pulls the fan's (pulled-up) PWM line low when its gate is
-  // driven high, so the GPIO duty needed is the complement of fan speed.
-  const uint8_t gpioDuty = static_cast<uint8_t>(
-      lroundf((100 - fanDutyPercent) * 255.0f / 100.0f));
-  ledcWrite(FAN_PIN, gpioDuty);
+  digitalWrite(FAN_PIN, fanOn ? HIGH : LOW);
 }
 
 void persistSettings() {
   preferences.putFloat("setpoint", setpointC);
   preferences.putFloat("topOffset", topOffsetC);
   preferences.putFloat("bottomOffset", bottomOffsetC);
-  preferences.putFloat("maxFanSpeed", maxFanSpeedPercent);
 }
 
 void updateDisplay() {
@@ -106,7 +81,7 @@ void updateDisplay() {
     display.setFont(u8g2_font_7x13_mf);
     display.drawStr(0, 13, ("Set:  " + String(setpointC, 1) + " C").c_str());
     display.drawStr(0, 30, (isnan(temperatureC) ? "Now:  fault" : "Now:  " + String(temperatureC, 1) + " C").c_str());
-    display.drawStr(0, 47, ("Fan:  " + (fanDutyPercent == 0 ? String("idle") : String(fanDutyPercent) + "%")).c_str());
+    display.drawStr(0, 47, fanOn ? "Fan:  venting" : "Fan:  idle");
     display.drawStr(0, 62, WiFi.localIP().toString().c_str());
   } while (display.nextPage());
 }
@@ -131,7 +106,7 @@ void handleButtons() {
 
 String page() {
   const String temperature = isnan(temperatureC) ? "Sensor fault" : String(temperatureC, 1) + " &deg;C";
-  const String state = fanDutyPercent == 0 ? String("IDLE") : String(fanDutyPercent) + "% speed";
+  const String state = fanOn ? "VENTING" : "IDLE";
   return String(F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
            "<title>AD5X Chamber</title><style>body{font-family:system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem;color:#17212b}"
            "main{border:1px solid #ccd5dc;border-radius:8px;padding:1.25rem}h1{margin-top:0}label{display:block;margin-top:1rem}"
@@ -141,9 +116,7 @@ String page() {
       + F("</span></p><form method='post' action='/settings'><label>Target temperature (&deg;C)<input name='setpoint' type='number' step='0.5' min='10' max='60' value='")
       + String(setpointC, 1) + F("'></label><label>Upper threshold above target (&deg;C)<input name='top' type='number' step='0.5' min='0.5' max='20' value='")
       + String(topOffsetC, 1) + F("'></label><label>Lower threshold below target (&deg;C)<input name='bottom' type='number' step='0.5' min='0.5' max='20' value='")
-      + String(bottomOffsetC, 1) + F("'></label><label>Maximum fan speed (%)<input name='maxfan' type='number' step='5' min='")
-      + String(MAX_FAN_SPEED_MIN_PERCENT, 0) + F("' max='") + String(MAX_FAN_SPEED_MAX_PERCENT, 0) + F("' value='")
-      + String(maxFanSpeedPercent, 0) + F("'></label><button type='submit'>Save settings</button></form></main></body></html>");
+      + String(bottomOffsetC, 1) + F("'></label><button type='submit'>Save settings</button></form></main></body></html>");
 }
 
 void handleSettings(AsyncWebServerRequest *request) {
@@ -156,10 +129,6 @@ void handleSettings(AsyncWebServerRequest *request) {
   if (request->hasParam("bottom", true)) {
     bottomOffsetC = constrain(request->getParam("bottom", true)->value().toFloat(), 0.5f, 20.0f);
   }
-  if (request->hasParam("maxfan", true)) {
-    maxFanSpeedPercent = constrain(request->getParam("maxfan", true)->value().toFloat(),
-        MAX_FAN_SPEED_MIN_PERCENT, MAX_FAN_SPEED_MAX_PERCENT);
-  }
   persistSettings();
   updateFan();
   request->redirect("/");
@@ -167,10 +136,8 @@ void handleSettings(AsyncWebServerRequest *request) {
 
 void setup() {
   Serial.begin(115200);
-  // Duty 0 holds the gate low, so the 2N7000 stays off and the fan's PWM
-  // pull-up drives full speed as a fail-safe until the control loop starts.
-  ledcAttach(FAN_PIN, FAN_PWM_FREQUENCY_HZ, FAN_PWM_RESOLUTION_BITS);
-  ledcWrite(FAN_PIN, 0);
+  pinMode(FAN_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW);
   analogReadResolution(12);
 
   pinMode(BUTTON_UP_PIN, INPUT_PULLUP);
@@ -189,7 +156,6 @@ void setup() {
   setpointC = preferences.getFloat("setpoint", DEFAULT_SETPOINT_C);
   topOffsetC = preferences.getFloat("topOffset", DEFAULT_TOP_OFFSET_C);
   bottomOffsetC = preferences.getFloat("bottomOffset", DEFAULT_BOTTOM_OFFSET_C);
-  maxFanSpeedPercent = preferences.getFloat("maxFanSpeed", DEFAULT_MAX_FAN_SPEED_PERCENT);
 
   WiFi.setHostname("AD5X-Chamber");
   AsyncWiFiManager wifiManager(&server, &dns);
@@ -217,6 +183,6 @@ void loop() {
     temperatureC = readTemperatureC();
     updateFan();
     updateDisplay();
-    Serial.printf("Temperature: %.1f C, fan: %u%%\n", temperatureC, fanDutyPercent);
+    Serial.printf("Temperature: %.1f C, fan: %s\n", temperatureC, fanOn ? "ON" : "OFF");
   }
 }

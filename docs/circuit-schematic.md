@@ -1,8 +1,8 @@
 # AD5X Chamber Regulator Circuit
 
-This schematic uses the AD5X 24 V auxiliary fan supply, a 4-wire 24 V PWM fan mounted in the back panel, a 2N7000 as an open-drain PWM line driver, the printer display's USB-A port for 5 V/GND to the Xiao ESP32-C3, a 0.96" I2C SSD1306 128x64 OLED, and two momentary buttons for local setpoint adjustment.
+This schematic uses the AD5X 24 V auxiliary fan supply, a plain (non-PWM) 24 V fan mounted in the back panel, a BC337 NPN transistor as an on/off low-side switch, the printer display's USB-A port for 5 V/GND to the Xiao ESP32-C3, a 0.96" I2C SSD1306 128x64 OLED, and two momentary buttons for local setpoint adjustment.
 
-The fan has its own PWM control input (25 kHz, open-drain, internally pulled up), so the Xiao does not switch the fan's power directly. The fan is left continuously powered from the fused +24 V rail at the back panel, and the Xiao only pulls the fan's PWM pin low through a small-signal MOSFET to set speed. That PWM wire runs forward from the back panel alongside the display ribbon cable to the Xiao/2N7000. Because the fan's own driver electronics commutate the motor internally, no flyback diode is needed on this signal line.
+The fan has no speed control input, so the Xiao switches it fully on or off instead of ramping speed. The fan's `+24 V` lead stays at the back panel, fused. The fan's `GND` return is run forward from the back panel (alongside the display ribbon cable) to the Xiao's control area, where the BC337 interrupts it to switch the fan. Because the BC337 is now switching real motor current, a flyback diode across the fan is required again to clamp the inductive kick when the transistor turns off.
 
 The Xiao is powered from the printer display's USB-A port (5 V and GND only; D+/D- are unused) instead of a buck converter, since the display port already sits at logic-compatible 5 V.
 
@@ -12,25 +12,24 @@ The Xiao is powered from the printer display's USB-A port (5 V and GND only; D+/
 
              +24 V  o----[ 1 A fuse ]----+--------------------+
                                          |                    |
-                                         |                 +--+---+
-                                         |                 | 24 V  |
-                                         |                 | PWM   |
-                                         |                 | FAN   |
-                                         |                 +--+-+--+
-                                         |                    | |
-             GND   o--------------------+--------------------+ | PWM pin
-                                                                |  (internal pull-up)
-                                                                |  wire routed forward
-                                                                |  alongside display
-                                                                |  ribbon cable
-                                                                |
-                                                          D  +--+--+
-                                        Xiao D1 ----[100R]--G  | 2N7000 |
-                                                          S  +--+--+
-                                                                |
-                                        [100k pulldown]         |
-                                        gate to source          |
-                                                                +---------------- GND
+                                         |                 +--+--+
+                                         |                 | 24 V |
+                                         |                 | FAN  |
+                                         |                 +--+--+
+                                         |                    |
+                                         |                    +------|<|------+
+                                         |                    |   flyback     |
+                                         |                    |   diode       |
+                                         |                    |               |
+                                         |                    |  fan GND, run forward
+                                         |                    |  alongside display
+                                         |                    |  ribbon cable
+                                         |                    |               |
+                                         |                              C  +--+--+
+                                         |            Xiao D1 --[330R]--B  | BC337 |
+                                         |                              E  +--+--+
+                                         |                                    |
+             GND   o--------------------+------------------------------------+--- GND
 
                          PRINTER DISPLAY USB-A PORT
 
@@ -68,12 +67,11 @@ The Xiao is powered from the printer display's USB-A port (5 V and GND only; D+/
 | Circuit point | Connect to |
 | --- | --- |
 | AD5X auxiliary fan `+24 V` | Fuse input, fan `+24 V` |
-| AD5X auxiliary fan `GND` | Fan `GND`, common ground |
-| Fan `PWM` pin | 2N7000 drain (wire routed with the display ribbon cable) |
-| 2N7000 source | Common ground |
-| Xiao `D1` | 100 Ohm gate resistor, then 2N7000 gate |
-| 100 kOhm gate pulldown | 2N7000 gate to source/ground |
-| Fan `TACH` pin | Not connected (unused) |
+| Fan `GND` (motor return) | BC337 collector (wire routed with the display ribbon cable) |
+| BC337 emitter | Common ground |
+| Xiao `D1` | 330 Ohm base resistor, then BC337 base |
+| Flyback diode cathode | Fan `+24 V` |
+| Flyback diode anode | Fan `GND` / BC337 collector |
 | Printer display USB-A `+5 V` | Xiao `5V`/`VBUS` pin |
 | Printer display USB-A `GND` | Xiao `GND` |
 | Thermistor divider midpoint | Xiao `D0` |
@@ -87,10 +85,11 @@ The Xiao is powered from the printer display's USB-A port (5 V and GND only; D+/
 ## Important electrical notes
 
 - Measure the AD5X fan connector with a multimeter before wiring. Confirm it is approximately 24 V DC and identify polarity; do not rely on connector appearance alone.
-- Confirm the fan's PWM pin is open-drain with an internal pull-up (standard for 4-wire fans). If it isn't, add an external 4.7-10 kOhm pull-up from the PWM pin to Xiao `3V3`.
-- Verify the display USB-A port actually provides 5 V (not 3.3 V or a data-only pass-through) and confirm its GND is common with the AD5X mainboard GND before connecting the Xiao. Confirm the port's available current comfortably covers the Xiao, OLED, and gate-drive current (a few hundred mA is typical and enough); do not add other 5 V loads to this port.
+- The BC337 is a plain NPN switch, not a logic-level MOSFET, so there's no gate-threshold uncertainty at 3.3 V — the 330 Ohm base resistor gives a forced beta of roughly 10-20 at typical small-fan currents (100-300 mA), which is enough to saturate it reliably. If your fan draws noticeably more than that, drop the base resistor toward 220 Ohm for more base drive margin.
+- The flyback diode must be rated for the fan's current and installed directly across the fan, reverse-biased during normal operation. This is required now that the BC337 switches real motor current, not just a logic signal.
+- Verify the display USB-A port actually provides 5 V (not 3.3 V or a data-only pass-through). Do not add other 5 V loads to this port beyond the Xiao and OLED.
+- **Do not rely on the display ribbon cable's ground pin as the system's common ground.** Measured continuity between the USB-A GND and the AD5X mainboard ground through the display cable can be tens of ohms (a thin signal-return trace, not a real ground bond) — nowhere near low enough to carry the fan's switched current or hold a stable ADC reference. Run a dedicated ground wire, comparable gauge to the fan wiring, directly from the AD5X mainboard's real power ground (the same GND the aux fan port uses) forward to the Xiao's ground bus, where it ties together the BC337 emitter, thermistor return, and OLED GND. That wire's low resistance dominates over the weak ribbon-cable path and establishes the actual common ground the circuit needs; the USB-A port then only needs to supply `5V`.
 - Do not connect 24 V to any Xiao GPIO, `3V3`, `5V`, or `D+`/`D-` pin.
-- The 100 Ohm gate resistor and 100 kOhm gate-to-source pulldown are recommended for defined switching during reset. With the gate pulled low at boot, the 2N7000 is off and the fan's internal pull-up holds the PWM line high, which the fan reads as full speed — this is a hardware fail-safe independent of firmware.
-- Keep the 24 V fan wiring physically separate from the thermistor, OLED, and button wiring. Connect all grounds at a deliberate common ground point.
+- Keep the 24 V fan wiring physically separate from the thermistor, OLED, and button wiring.
 - The OLED and both buttons run at 3.3 V logic; do not substitute a 5 V-only OLED module without level shifting.
-- The firmware ramps fan speed proportionally to how far the temperature is above the setpoint, and drives the fan to full speed if the thermistor reading is out of range, so a sensor or wiring fault fails toward ventilation.
+- Unlike the earlier PWM design, an undriven `D1` (GPIO low, at boot or if the firmware hangs) turns the BC337 off, which turns the fan off — there is no hardware fail-safe defaulting to full speed. The firmware's fail-safe (forcing the fan on when the thermistor reading is invalid) only covers sensor faults, not a hung MCU. The firmware turns the fan on if the thermistor reading is out of range, so a sensor or wiring fault fails toward ventilation.
