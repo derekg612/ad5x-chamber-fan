@@ -1,11 +1,13 @@
 # AD5X Chamber Regulator
 
+See [docs/circuit-schematic.md](docs/circuit-schematic.md) for the 24 V fan, MOSFET, buck converter, Xiao, and thermistor wiring.
+
 ## Hardware
 
 - Xiao ESP32-C3
 - 10 kOhm NTC thermistor, Beta 3950
 - 10 kOhm fixed resistor
-- 5 V fan controlled through a logic-level N-MOSFET, with a flyback diode
+- 24 V fan controlled through a logic-level N-MOSFET, with a flyback diode
 
 Wire the thermistor and fixed resistor as a divider from 3.3 V to GND, with the midpoint on `D0`. The firmware assumes the thermistor is the high-side component and the fixed resistor is the low-side component. Connect the MOSFET gate to `D1`, share grounds, and power the fan from an appropriate external supply. Do not power the fan through the Xiao.
 
