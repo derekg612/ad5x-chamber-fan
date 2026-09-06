@@ -7,7 +7,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider, a BC337 low-side
+// Xiao ESP32-C3 pins. Use a 3.3 V thermistor divider, a 2N2222A (or BC337) low-side
 // switch on the fan's ground return, a hardware-I2C OLED (D4/D5), and two
 // momentary buttons to nudge the setpoint locally.
 constexpr uint8_t THERMISTOR_PIN = D0;
