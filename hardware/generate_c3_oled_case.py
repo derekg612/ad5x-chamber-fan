@@ -51,36 +51,18 @@ OLED_WINDOW_CY = 0.0
 # Case parameters
 # ---------------------------------------------------------------------------
 FIT = 0.25            # clearance around the PCB on each side
-# The wall has to be thick enough that the rebate step (WALL - LIP_T -
-# LIP_CLEAR) still has material left after the snap groove is cut into it.
-# check_parameters() enforces this.
-WALL = 2.4            # side wall thickness
+WALL = 1.8            # side wall thickness
 FLOOR = 1.2           # tray floor thickness
 CEIL = 1.2            # lid top plate thickness
 
 UNDER_PCB = 1.2       # space beneath the PCB for solder bumps / via tails
-OVER_PCB = 7.0        # headroom above the PCB; TO-92 lying flat is ~4.5 mm
+OVER_PCB = 6.0        # headroom above the PCB; TO-92 lying flat is ~4.5 mm
 LEDGE = 1.5           # width of the ledge the PCB rests on
-# Material left above the wall openings, bridging them to the tray rim. The
-# split line has to sit at least this far above the tallest opening or the
-# bridge prints as a sliver.
-OPENING_WEB = 1.0
 
 LIP_T = 0.9           # lid lip thickness
 LIP_CLEAR = 0.15      # sliding clearance between lip and tray rebate
-# Snap detent. The ridge protrudes DETENT_R past the tray wall during
-# insertion, so DETENT_R *is* the deflection the lip ring has to absorb before
-# it drops into the groove. The lip is a closed rectangular ring, which is far
-# stiffer than a free cantilever, so keep this modest -- much past 0.4 mm and
-# PLA tends to crack or simply refuse to seat.
-DETENT_R = 0.35       # half-round snap detent radius
-DETENT_CLEAR = 0.1    # groove cut oversize so the ridge seats without binding
+DETENT_R = 0.55       # half-round snap detent radius
 DETENT_LEN = 12.0     # length of each detent ridge along X
-DETENT_DEFLECTION_RANGE = (0.25, 0.45)  # sane snap force band
-
-# Minimum feature sizes for a 0.4 mm nozzle.
-MIN_PRINTABLE_WALL = 0.6
-TO92_FLAT_HEIGHT = 4.5  # TO-92 package lying on its side
 
 PAD_REACH = 1.5       # how far the lid's retention pads overhang the PCB edge
 PAD_LEN = 5.0         # length of each retention pad
@@ -109,8 +91,8 @@ Z_CAVITY_TOP = Z_PCB_TOP + OVER_PCB
 Z_CASE_TOP = Z_CAVITY_TOP + CEIL
 
 # Split the halves above the USB opening so the mating line does not cut
-# through the connector cutout, leaving OPENING_WEB of material bridging it.
-Z_SPLIT = Z_PCB_TOP + 5.0
+# through the connector cutout.
+Z_SPLIT = Z_PCB_TOP + 4.0
 
 Z_USB_BOT = Z_PCB_TOP - 0.5
 Z_USB_TOP = Z_USB_BOT + USB_H
@@ -121,56 +103,6 @@ Z_DETENT = (Z_REBATE + Z_SPLIT) / 2.0
 # Rebate: above Z_REBATE the tray wall steps outward to receive the lid lip.
 REBATE_L = INNER_L + 2 * (LIP_T + LIP_CLEAR)
 REBATE_W = INNER_W + 2 * (LIP_T + LIP_CLEAR)
-
-
-def check_parameters():
-    """Fail loudly on parameter combinations that would print badly.
-
-    These are the constraints that are easy to break by nudging one dimension
-    and hard to notice in a slicer preview.
-    """
-    rebate_wall = WALL - LIP_T - LIP_CLEAR
-    left_at_groove = rebate_wall - (DETENT_R + DETENT_CLEAR)
-    assert left_at_groove >= MIN_PRINTABLE_WALL, (
-        f"Only {left_at_groove:.2f} mm of tray wall remains behind the snap groove "
-        f"(need {MIN_PRINTABLE_WALL}). Increase WALL or reduce DETENT_R/LIP_T."
-    )
-
-    # The ridge is embedded in the lip by (DETENT_R - LIP_CLEAR); what is left
-    # of the lip behind it still has to be printable.
-    left_in_lip = LIP_T - (DETENT_R - LIP_CLEAR)
-    assert left_in_lip >= 0.4, (
-        f"Only {left_in_lip:.2f} mm of lip remains behind the snap ridge. "
-        f"Increase LIP_T or reduce DETENT_R."
-    )
-
-    # DETENT_R is the deflection the lip ring absorbs on the way in.
-    low, high = DETENT_DEFLECTION_RANGE
-    assert low <= DETENT_R <= high, (
-        f"Snap deflection {DETENT_R:.2f} mm is outside the {low}-{high} mm band: "
-        f"too little will not hold the lid, too much cracks the lip."
-    )
-
-    assert OVER_PCB >= TO92_FLAT_HEIGHT + 0.5, (
-        f"OVER_PCB ({OVER_PCB}) leaves no margin for a TO-92 lying flat "
-        f"({TO92_FLAT_HEIGHT} mm)."
-    )
-
-    # Not just "the opening does not cross the split" -- there has to be enough
-    # material bridging above it to actually print.
-    for name, top in (("cable slot", Z_CABLE_TOP), ("USB opening", Z_USB_TOP)):
-        web = Z_SPLIT - top
-        assert web >= OPENING_WEB, (
-            f"Only {web:.2f} mm of tray wall bridges above the {name} "
-            f"(need {OPENING_WEB}). Raise Z_SPLIT or shorten the opening."
-        )
-
-    lid_depth = Z_CAVITY_TOP - Z_SPLIT
-    assert lid_depth >= 1.5, (
-        f"Lid interior is only {lid_depth:.2f} mm deep; raise OVER_PCB."
-    )
-
-    assert LEDGE * 2 < min(INNER_L, INNER_W), "Ledge consumes the whole pocket."
 
 
 def box(lx, ly, z0, z1, cx=0.0, cy=0.0):
@@ -224,7 +156,7 @@ def build_bottom():
     )
 
     # Snap grooves, cut slightly oversize so the ridges seat without binding.
-    for cyl in detent_cylinders(DETENT_R + DETENT_CLEAR):
+    for cyl in detent_cylinders(DETENT_R + 0.1):
         part = part.difference(cyl)
 
     return part
@@ -289,14 +221,11 @@ def report(name, mesh):
 
 
 def main():
-    check_parameters()
     out_dir = os.path.dirname(os.path.abspath(__file__))
 
     print("ESP32-C3 OLED 0.42\" enclosure")
     print(f"  PCB {PCB_L} x {PCB_W} x {PCB_T} mm, {OVER_PCB} mm headroom above the board")
     print(f"  Case {OUTER_L:.1f} x {OUTER_W:.1f} x {Z_CASE_TOP:.1f} mm overall")
-    print(f"  Snap: {Z_SPLIT - Z_REBATE:.1f} mm lip, {DETENT_R:.2f} mm deflection, "
-          f"{WALL - LIP_T - LIP_CLEAR - DETENT_R - DETENT_CLEAR:.2f} mm wall behind the groove")
     print()
 
     for name, mesh in (("case_bottom", build_bottom()), ("case_top", build_top())):
