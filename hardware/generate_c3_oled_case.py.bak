@@ -10,12 +10,8 @@ Design notes:
     board, which is the tallest thing inside.
   * The two halves snap together with half-round detent ridges on the lid's
     lip engaging matching grooves in the tray wall.
-  * A circular cable hole in the middle of the tray floor -- the back panel,
-    the face opposite the OLED -- passes the fan return, ground bond,
-    thermistor pair, and button wires. It opens into the relief under the
-    board, so those wires are soldered to pads on the underside of the PCB and
-    drop straight down and out; there is only UNDER_PCB of height in there, so
-    they cannot be routed sideways first.
+  * A cable slot in the end wall passes the fan return, ground bond, thermistor
+    pair, and button wires.
 
 Run with:  ~/.pythonenvs/stl/bin/python3 generate_c3_oled_case.py
 
@@ -36,6 +32,7 @@ import trimesh
 # ---------------------------------------------------------------------------
 PCB_L = 24.8          # MEASURED (board reference): length, USB end to far end
 PCB_W = 20.5          # MEASURED (board reference): width
+PCB_D = 11.5          # MEASURED: depth (front to back), from the board outline
 PCB_T = 1.6           # ASSUMED: standard 1.6 mm FR4
 
 # USB-C receptacle on the +X end. ASSUMED: typical SMD vertical receptacle,
@@ -67,18 +64,17 @@ LIP_T = 0.9           # lid lip thickness
 LIP_CLEAR = 0.15      # sliding clearance between lip and tray rebate
 DETENT_R = 0.55       # half-round snap detent radius
 DETENT_LEN = 12.0     # length of each detent ridge along X
-DETENT_CLEAR = 0.1    # extra depth of the groove behind the seated ridge
+DETENT_CLEAR = 0.4    # vertical clearance between ridges and groove floor
+DETENT_CY = 0.0       # lateral offset of detent center (positive = right wall)
 
 PAD_REACH = 1.5       # how far the lid's retention pads overhang the PCB edge
 PAD_LEN = 5.0         # length of each retention pad
 PAD_ENABLED = True    # pads press the PCB down onto the ledge (no screws)
 
-# Cable hole through the middle of the tray floor (the back panel): fan
-# return, ground bond, thermistor pair, plus button wires. 6.0 mm of bore is
-# roughly the area of the 8 x 3.6 mm slot this replaced.
-CABLE_D = 6.0
-CABLE_CX = 0.0        # dead center of the floor
-CABLE_CY = 0.0
+# Cable slot in the -X end wall: fan return, ground bond, thermistor pair,
+# plus button wires.
+CABLE_W = 8.0
+CABLE_H = 3.6
 
 SEGMENTS = 48         # cylinder facet count
 
@@ -87,8 +83,10 @@ SEGMENTS = 48         # cylinder facet count
 # ---------------------------------------------------------------------------
 INNER_L = PCB_L + 2 * FIT
 INNER_W = PCB_W + 2 * FIT
+INNER_Z = PCB_D + 2 * FIT
 OUTER_L = INNER_L + 2 * WALL
 OUTER_W = INNER_W + 2 * WALL
+OUTER_Z = INNER_Z + 2 * WALL
 
 Z_FLOOR_TOP = FLOOR
 Z_PCB_BOT = Z_FLOOR_TOP + UNDER_PCB
@@ -103,11 +101,15 @@ Z_SPLIT = Z_PCB_TOP + 4.0
 
 Z_USB_BOT = Z_PCB_TOP - 0.5
 Z_USB_TOP = Z_USB_BOT + USB_H
+Z_CABLE_BOT = Z_PCB_TOP + 0.2
+Z_CABLE_TOP = Z_CABLE_BOT + CABLE_H
 Z_DETENT = (Z_REBATE + Z_SPLIT) / 2.0
 
 # Rebate: above Z_REBATE the tray wall steps outward to receive the lid lip.
 REBATE_L = INNER_L + 2 * (LIP_T + LIP_CLEAR)
 REBATE_W = INNER_W + 2 * (LIP_T + LIP_CLEAR)
+REBATE_Z = INNER_Z + 2 * (LIP_T + LIP_CLEAR)
+INNER_Z = PCB_D + 2 * FIT
 
 
 def box(lx, ly, z0, z1, cx=0.0, cy=0.0):
@@ -125,19 +127,12 @@ def x_cylinder(radius, length, cx, cy, cz):
     return mesh
 
 
-def z_cylinder(radius, z0, z1, cx=0.0, cy=0.0):
-    """Cylinder whose axis runs along Z, spanning z0..z1."""
-    mesh = trimesh.creation.cylinder(radius=radius, height=z1 - z0, sections=SEGMENTS)
-    mesh.apply_translation((cx, cy, 0.5 * (z0 + z1)))
-    return mesh
-
-
 def detent_cylinders(radius):
     """Snap detents on both long walls, as half-round ridges running along X."""
     y = REBATE_W / 2.0
     return [
-        x_cylinder(radius, DETENT_LEN, 0.0, +y, Z_DETENT),
-        x_cylinder(radius, DETENT_LEN, 0.0, -y, Z_DETENT),
+        x_cylinder(radius, DETENT_LEN, DETENT_CY, +y, Z_DETENT),
+        x_cylinder(radius, DETENT_LEN, DETENT_CY, -y, Z_DETENT),
     ]
 
 
@@ -154,25 +149,21 @@ def build_bottom():
         box(INNER_L - 2 * LEDGE, INNER_W - 2 * LEDGE, Z_FLOOR_TOP, Z_PCB_BOT + 0.01)
     )
 
-    # Step the wall outward above the PCB to receive the lid's lip.
-    part = part.difference(box(REBATE_L, REBATE_W, Z_REBATE, Z_SPLIT + 1.0))
+    # Step the wall outward above the PCB to receive the lid's lip (on the -Z wall).
+    part = part.difference(box(REBATE_L, REBATE_W, REBATE_Z, Z_SPLIT + 1.0))
 
     # USB-C opening in the +X end wall.
     part = part.difference(
         box(2 * WALL + 2.0, USB_W, Z_USB_BOT, Z_USB_TOP, cx=OUTER_L / 2.0)
     )
 
-    # Cable hole through the middle of the floor -- the back panel. It breaks
-    # into the under-board relief, so wires soldered to the PCB's underside
-    # pads drop straight out the back.
+    # Cable slot in the back (-Z) wall (largest face).
     part = part.difference(
-        z_cylinder(
-            CABLE_D / 2.0, -1.0, Z_PCB_BOT + 0.01, cx=CABLE_CX, cy=CABLE_CY
-        )
+        box(2 * WALL + 2.0, CABLE_W, CABLE_H, Z_CABLE_BOT, cz=-OUTER_Z / 2.0)
     )
 
     # Snap grooves, cut slightly oversize so the ridges seat without binding.
-    for cyl in detent_cylinders(DETENT_R + DETENT_CLEAR):
+    for cyl in detent_cylinders(DETENT_R + 0.1):
         part = part.difference(cyl)
 
     return part
@@ -227,37 +218,6 @@ def build_top():
     return part
 
 
-def check_parameters():
-    """Assert the dimensions that quietly ruin a print if they drift."""
-    behind_groove = WALL - LIP_T - LIP_CLEAR - DETENT_R - DETENT_CLEAR
-    assert behind_groove > 0.0, (
-        f"snap groove cuts {-behind_groove:.2f} mm through the outside of the wall"
-    )
-    if behind_groove < 0.4:
-        print(
-            f"  WARNING: only {behind_groove:.2f} mm of tray wall behind the snap"
-            f" groove -- thinner than one 0.4 mm extrusion, so it may split.\n"
-            f"           Widen WALL or shrink DETENT_R to fix."
-        )
-    assert DETENT_R <= LIP_T, (
-        f"snap ridge {DETENT_R} mm needs the {LIP_T} mm lip to deflect over it"
-    )
-    assert UNDER_PCB > 0.0, (
-        "no relief under the PCB, so the cable hole would be blind"
-    )
-    assert OVER_PCB >= 4.5, f"only {OVER_PCB} mm above the PCB; TO-92 flat needs 4.5"
-    assert Z_USB_TOP < Z_SPLIT, (
-        "USB opening crosses the tray/lid split; raise Z_SPLIT"
-    )
-
-    # The cable hole must land inside the under-board relief, otherwise it
-    # breaks out through the ledge the PCB rests on.
-    relief_x = (INNER_L - 2 * LEDGE) / 2.0
-    relief_y = (INNER_W - 2 * LEDGE) / 2.0
-    assert abs(CABLE_CX) + CABLE_D / 2.0 <= relief_x, "cable hole cuts the X ledge"
-    assert abs(CABLE_CY) + CABLE_D / 2.0 <= relief_y, "cable hole cuts the Y ledge"
-
-
 def report(name, mesh):
     ext = mesh.extents
     status = "watertight" if mesh.is_watertight else "NOT watertight"
@@ -269,7 +229,6 @@ def report(name, mesh):
 
 def main():
     out_dir = os.path.dirname(os.path.abspath(__file__))
-    check_parameters()
 
     print("ESP32-C3 OLED 0.42\" enclosure")
     print(f"  PCB {PCB_L} x {PCB_W} x {PCB_T} mm, {OVER_PCB} mm headroom above the board")

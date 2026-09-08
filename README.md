@@ -62,7 +62,7 @@ Note that board references list an onboard LED on `IO0`, shared with the up butt
 ~/.pythonenvs/stl/bin/python3 hardware/generate_c3_oled_case.py
 ```
 
-It writes `case_bottom.stl` and `case_top.stl` alongside the script. The board is held without soldered headers, resting on a perimeter ledge and pressed down by pads on the lid, with 7 mm of headroom so the 2N2222A can lie flat on the PCB. Openings: USB-C on one end, an 8 x 3.6 mm cable slot on the other for the fan return, ground bond, thermistor pair and button wires, and a window over the OLED. Every dimension is a named constant at the top of the script, and `check_parameters()` asserts the ones that quietly ruin a print (wall left behind the snap groove, snap deflection, material bridging the wall openings, TO-92 headroom).
+It writes `case_bottom.stl` and `case_top.stl` alongside the script. The board is held without soldered headers, resting on a perimeter ledge and pressed down by pads on the lid, with 7 mm of headroom so the 2N2222A can lie flat on the PCB. Openings: USB-C on one end, a 6 mm circular cable hole in the middle of the tray floor -- the back panel -- for the fan return, ground bond, thermistor pair and button wires, and a window over the OLED. That hole opens into the relief under the board, so those wires solder to pads on the PCB's underside and drop straight out the back; there is only 1.2 mm of height in there, so they cannot run sideways first. Every dimension is a named constant at the top of the script, and `check_parameters()` asserts the ones that quietly ruin a print (wall left behind the snap groove, snap deflection, material bridging the wall openings, TO-92 headroom).
 
 [hardware/preview_case.py](hardware/preview_case.py) renders the result for inspection:
 

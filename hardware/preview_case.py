@@ -64,7 +64,7 @@ def render_iso(tray, lid, path):
 
     ax = fig.add_subplot(131, projection="3d")
     shaded(ax, tray, TRAY_COLOR)
-    frame_3d(ax, [tray], "Tray (USB-C right, cable slot left)")
+    frame_3d(ax, [tray], "Tray (USB-C right, cable hole in the floor)")
     ax.view_init(elev=32, azim=-52)
 
     # Show the lid from underneath -- that is where the lip, snap ridges and
@@ -131,7 +131,7 @@ def render_sections(tray, lid, path):
     axes[0].legend(fontsize=7, loc="upper right")
 
     draw_section(axes[1], tray, lid, (0, 1, 0), (0, 0, 0),
-                 "Section along length (y=0)\nUSB-C right, cable slot left")
+                 "Section along length (y=0)\nUSB-C right, cable hole through the floor")
 
     # Zoom on one snap joint.
     draw_section(axes[2], tray, lid, (1, 0, 0), (0, 0, 0),
