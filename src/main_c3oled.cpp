@@ -12,11 +12,11 @@
 //
 // Only four pins on this board are free of strapping/JTAG/UART duty:
 // IO0, IO1, IO3 and IO10, and all four are used here. The OLED sits on
-// IO8/IO9, which are themselves strapping pins -- the I2C pull-ups hold them
+// IO5/IO6, which are themselves strapping pins -- the I2C pull-ups hold them
 // in the states the bootloader needs, which is why they work, but it also
 // means neither can be reused.
-constexpr uint8_t OLED_SDA_PIN = 8;
-constexpr uint8_t OLED_SCL_PIN = 9;
+constexpr uint8_t OLED_SDA_PIN = 5;//8;
+constexpr uint8_t OLED_SCL_PIN = 6;//9;
 constexpr uint8_t THERMISTOR_PIN = 1;   // ADC1_CH1
 constexpr uint8_t FAN_PIN = 10;
 constexpr uint8_t BUTTON_UP_PIN = 0;
