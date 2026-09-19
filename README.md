@@ -52,7 +52,7 @@ Unlike the Xiao build's on/off control, fan speed ramps proportionally between `
 - 2-wire 24 V fan (0.29 A @ 24 V), PWM speed-controlled through a 2N2222A NPN transistor (or BC337) on its ground return, with a 1N5819 Schottky across the fan
 - 2 momentary buttons for local setpoint adjustment and printer LED control
 
-Same PWM fan control and `#define` knobs as the touchscreen build, but with a compact four-line display and physical buttons. This board only has four GPIOs free of strapping/JTAG/UART duty, and all four are used: thermistor on `IO1`, transistor base (via 220 Ohm) on `IO10`, and the setpoint up/down buttons on `IO0` and `IO3`. The OLED occupies `IO5`/`IO6` internally (the board reference says `IO8`/`IO9`; see the schematic doc if the panel stays blank).
+Same PWM fan control and `#define` knobs as the touchscreen build, but with a compact portrait display (mounted with the USB port on the left) and physical buttons. Thermistor on `IO2`, transistor base (via 220 Ohm) on `IO20`, and the setpoint up/down buttons on `IO1` and `IO4`. `IO20` is UART0's RX pin, which is free because this environment sends `Serial` over the board's native USB instead. The OLED occupies `IO5`/`IO6` internally (the board reference says `IO8`/`IO9`; see the schematic doc if the panel stays blank).
 
 #### Printer LED toggle
 
@@ -60,9 +60,7 @@ Pressing **both buttons at once** toggles the printer's chamber light and shows 
 
 Stock AD5X firmware does not expose Moonraker, so this talks to Flashforge's legacy command socket on TCP 8899, the same protocol as the `ad5x_send_command.py` helper script: commands framed with a leading `~` and CRLF, replies terminated by `ok`. Each toggle takes control (`M601 S1`), sends `M146 r255 g255 b255 F0` or `M146 r0 g0 b0 F0`, then hands control back (`M602`) so the printer's touchscreen is not left locked out. The printer will not report its light state back, so the firmware tracks what it last sent and persists it across reboots; if the light is changed at the printer, the first press afterwards may be a no-op.
 
-The printer's hostname and port are on the web settings page, defaulting to `ad5x.lan:8899`. A failed toggle leaves the setting untouched and shows `no reply` on the panel, with the detail on the serial monitor.
-
-Note that board references list an onboard LED on `IO0`, shared with the up button. Depending on how that LED is wired this may be harmless or may make the button read as permanently pressed -- see [docs/c3-oled-042-schematic.md](docs/c3-oled-042-schematic.md) for what to watch for and the two-line fix if it bites.
+The printer's hostname and port are on the web settings page, defaulting to `ad5x.lan:8899`. A failed toggle leaves the setting untouched and shows `fail` on the panel, with the detail on the serial monitor.
 
 ### Enclosure
 

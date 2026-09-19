@@ -5,14 +5,14 @@ A generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED
 
 ## Pin budget
 
-This board is unusually tight. Of its 13 broken-out GPIOs, only **IO0, IO1, IO3 and IO10** are free of strapping, JTAG, or UART duty -- and all four are used:
+This board is unusually tight: of its 13 broken-out GPIOs, only IO0, IO1, IO3 and IO10 are free of strapping, JTAG or UART duty. The build uses:
 
 | GPIO | Use | Notes |
 | --- | --- | --- |
-| IO0 | Setpoint-up button | ADC1_CH0. See the onboard-LED caveat below. |
-| IO1 | Thermistor divider midpoint | ADC1_CH1 |
-| IO3 | Setpoint-down button | ADC1_CH3 |
-| IO10 | 2N2222A base (via 220 Ohm) | PWM output |
+| IO1 | Setpoint-up button | Internal pull-up |
+| IO2 | Thermistor divider midpoint | ADC1_CH2. Strapping pin -- see below. |
+| IO4 | Setpoint-down button | Internal pull-up. JTAG TMS, free because JTAG goes over USB. |
+| IO20 | 2N2222A base (via 220 Ohm) | PWM output. UART0 RX, free because Serial goes over USB. |
 
 Reserved, do not reuse:
 
@@ -20,22 +20,18 @@ Reserved, do not reuse:
 | --- | --- |
 | IO5 | OLED I2C SDA (also JTAG TDI) |
 | IO6 | OLED I2C SCL (also JTAG TCK) |
-| IO4, IO7 | JTAG |
-| IO2, IO8, IO9 | Strapping -- IO9 selects download mode at reset |
-| IO20, IO21 | UART0 console -- repurposing these breaks serial programming |
+| IO8, IO9 | Strapping -- IO9 selects download mode at reset |
+| IO18, IO19 | Native USB (the USB-C port) |
+
+IO0, IO3, IO7, IO10 and IO21 are unused.
 
 The board reference puts the OLED on IO8/IO9, but on the board this was built with it is wired to IO5/IO6, and boards sold under this name vary. If the panel stays blank, set `OLED_SDA_PIN`/`OLED_SCL_PIN` in `src/main_c3oled.cpp` to 8/9 and try again.
 
-IO5/IO6 being JTAG pins is harmless: the C3 routes JTAG through its built-in USB by default, so they behave as ordinary GPIO, and the OLED's I2C pull-ups keep them from floating. IO8/IO9 are left unused, but they are still strapping pins, so don't add anything there that could pull them low at reset.
+IO4, IO5 and IO6 being JTAG pins is harmless: the C3 routes JTAG through its built-in USB by default, so they behave as ordinary GPIO. IO8/IO9 are left unused, but they are still strapping pins, so don't add anything there that could pull them low at reset.
 
-## Onboard LED caveat on IO0
+**Thermistor on IO2:** IO2 is listed as a strapping pin, but per Espressif's [hardware design guidelines](https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32c3/schematic-checklist.html) it does not actually select the boot mode -- they only recommend pulling it high to guard against glitches. The divider holds it partway instead (about 1.65 V at 25 C, rising as the chamber warms), so this should be fine, but if boots are ever unreliable, move the thermistor to IO3 (also ADC1) and change `THERMISTOR_PIN`.
 
-Board references list an onboard LED on IO0, which is also where the setpoint-up button goes. Whether that's a problem depends on how the LED is wired, and this has not been verified on hardware:
-
-- **LED wired from 3.3 V through a resistor to IO0** (active-low): no problem. The internal pull-up holds the pin high, the button pulls it low, and the LED lights when pressed as a free indicator.
-- **LED wired from IO0 through a resistor to ground** (active-high): a problem. The LED clamps the pin below the input-high threshold, so the button reads as permanently pressed and the setpoint will run away upward.
-
-**Symptom to watch for on first boot:** the setpoint climbing on its own without touching anything. If that happens, swap the roles of IO0 and IO1 in `src/main_c3oled.cpp` -- put the thermistor on IO0 (still ADC-capable) and the up button on IO1. That's a two-line change to `THERMISTOR_PIN` and `BUTTON_UP_PIN`, and keeps everything on the four safe pins.
+**Fan on IO20:** the USB-C port is wired to the C3's native USB, so flashing and the serial monitor never touch UART0 (IO20/IO21). The `esp32_c3_oled_042` environment sets `ARDUINO_USB_CDC_ON_BOOT=1` so that `Serial` also goes over USB, which leaves IO20 free. IO20 was picked over IO21 because it is an input during boot: IO21 is UART0 TX, which idles high and carries the boot log at every reset, so the fan would run and chatter for a moment before the firmware takes over. If the fan still twitches at power-up on IO20, add a 4.7-10 kOhm resistor from IO20 to GND.
 
 ## Wiring
 
@@ -53,7 +49,7 @@ Board references list an onboard LED on IO0, which is also where the setpoint-up
                                          |                    |    1N5819     |
                                          |                    |               |
                                          |                              C  +---+---+
-                                         |          IO10 --[220R]-------B  |2N2222A|
+                                         |          IO20 --[220R]-------B  |2N2222A|
                                          |                              E  +---+---+
                                          |                                    |
              GND   o--------------------+------------------------------------+--- GND
@@ -64,12 +60,12 @@ Board references list an onboard LED on IO0, which is also where the setpoint-up
 
              3V3 o----[ 100 kOhm NTC, Beta 3950 ]----+----[ 100 kOhm ]----o GND
                                                       |
-                                                      +--------------------- IO1
+                                                      +--------------------- IO2
 
                          SETPOINT BUTTONS (momentary, to GND)
 
-             IO0 o----[ momentary button ]---- GND     (setpoint up)
-             IO3 o----[ momentary button ]---- GND     (setpoint down)
+             IO1 o----[ momentary button ]---- GND     (setpoint up)
+             IO4 o----[ momentary button ]---- GND     (setpoint down)
              Internal pull-ups enabled in firmware; no external resistors needed.
 
                          POWER
@@ -80,21 +76,29 @@ Board references list an onboard LED on IO0, which is also where the setpoint-up
 
 ## Display
 
-The 72x40 panel is small enough that the layout is four tight lines rather than the roomier one on the 128x64 OLED build:
+The board is mounted in portrait with the USB port on the left and the screen facing you, so the 72x40 panel is drawn a quarter turn round as 40 pixels wide by 72 tall:
 
 ```
-Set 35.0
-Now 32.4
-Fan 45%
-192.168.1.42
+  NOW
+  32.4
+  SET
+  35.0
+  FAN
+  45%
+192.168.
+  1.42
 ```
 
-Setpoint, current temperature (or `Now fault`), fan duty (or `Fan idle`), and the IP address in a smaller font. A long IP may clip slightly at the right edge.
+The current temperature is the largest reading (`fault` if the thermistor reading is invalid). Below it are the setpoint and the fan duty (`idle` when off), each with a tiny label above its value, since 40 pixels is only six characters wide in the value font. The IP address is split after its second octet so that even `255.255.255.255` fits.
+
+Pressing both buttons shows `LIGHT` over `...` while the command is sent, then `ON`, `OFF`, or `fail` if the printer didn't reply.
+
+If the text comes out upside down, the panel is mounted the other way round on your board: change `U8G2_R3` to `U8G2_R1` in the display constructor in `src/main_c3oled.cpp`.
 
 ## Important electrical notes
 
 - Same ground-bonding requirement as the other builds: run a dedicated ground wire from the AD5X mainboard's real power ground to this board's ground bus. Do not rely on the display ribbon cable's ground pin.
 - The 1N5819 flyback diode is required, installed directly across the fan.
-- The 100 kOhm divider has a source impedance of around 50 kOhm, which is high enough for the ADC's sampling capacitor and fan-switching noise to pull readings around. A 100 nF ceramic capacitor from IO1 to GND, placed at the board, steadies it.
-- An undriven IO10 (at boot, or if the firmware hangs) turns the fan off, not on. The firmware's sensor-fault fail-safe (full speed when the thermistor reading is invalid) still applies.
+- The 100 kOhm divider has a source impedance of around 50 kOhm, which is high enough for the ADC's sampling capacitor and fan-switching noise to pull readings around. A 100 nF ceramic capacitor from IO2 to GND, placed at the board, steadies it.
+- An undriven IO20 (at boot, or if the firmware hangs) turns the fan off, not on. The firmware's sensor-fault fail-safe (full speed when the thermistor reading is invalid) still applies.
 - Do not connect 24 V to any board GPIO, `3V3`, or `5V` pin.

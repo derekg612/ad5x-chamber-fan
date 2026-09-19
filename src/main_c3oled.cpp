@@ -10,20 +10,31 @@
 
 // Generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED.
 //
-// Only four pins on this board are free of strapping/JTAG/UART duty:
-// IO0, IO1, IO3 and IO10, and all four are used here. The OLED sits on
-// IO5/IO6 (JTAG pins, usable as GPIO because JTAG goes over the built-in
-// USB). The board reference says IO8/IO9 instead; if the panel stays blank,
-// try 8 and 9 here.
+// The OLED sits on IO5/IO6 (JTAG pins, usable as GPIO because JTAG goes over
+// the built-in USB). The board reference says IO8/IO9 instead; if the panel
+// stays blank, try 8 and 9 here.
+//
+// The thermistor has to be on an ADC1 pin (IO0-IO4). IO2 is a strapping pin,
+// though it does not select the boot mode -- Espressif only recommends a
+// pull-up there against glitches. If boots are ever unreliable, use IO3.
+//
+// The fan is on IO20, UART0's RX pin. That only works because this build sends
+// Serial over the native USB (ARDUINO_USB_CDC_ON_BOOT in platformio.ini), so
+// UART0 is never started. IO20 is an input during boot, so the fan stays off
+// until the firmware takes it; IO21 (TX) would chatter with the boot log.
 constexpr uint8_t OLED_SDA_PIN = 5;
 constexpr uint8_t OLED_SCL_PIN = 6;
-constexpr uint8_t THERMISTOR_PIN = 1;   // ADC1_CH1
-constexpr uint8_t FAN_PIN = 10;
-constexpr uint8_t BUTTON_UP_PIN = 0;
-constexpr uint8_t BUTTON_DOWN_PIN = 3;
+constexpr uint8_t THERMISTOR_PIN = 2;   // ADC1_CH2
+constexpr uint8_t FAN_PIN = 20;
+constexpr uint8_t BUTTON_UP_PIN = 1;
+constexpr uint8_t BUTTON_DOWN_PIN = 4;
 
-constexpr uint8_t DISPLAY_WIDTH = 72;
-constexpr uint8_t DISPLAY_HEIGHT = 40;
+// The board is mounted in portrait with the USB port on the left, so the
+// 72x40 panel is drawn rotated a quarter turn as 40 wide by 72 tall. If the
+// text comes out upside down, the panel sits the other way round on your
+// board: change U8G2_R3 to U8G2_R1 in the display constructor below.
+constexpr uint8_t DISPLAY_WIDTH = 40;
+constexpr uint8_t DISPLAY_HEIGHT = 72;
 
 // ---------------------------------------------------------------------------
 // Fan drive configuration -- identical to the touchscreen build.
@@ -96,7 +107,7 @@ constexpr unsigned long FLASH_MESSAGE_MS = 1500;
 AsyncWebServer server(80);
 DNSServer dns;
 Preferences preferences;
-U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE, OLED_SCL_PIN, OLED_SDA_PIN);
+U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R3, U8X8_PIN_NONE, OLED_SCL_PIN, OLED_SDA_PIN);
 
 float setpointC = DEFAULT_SETPOINT_C;
 float topOffsetC = DEFAULT_TOP_OFFSET_C;
@@ -176,23 +187,40 @@ void persistSettings() {
   preferences.putUShort("printerPort", printerPort);
 }
 
-// The panel is only 72x40, so the layout is four tight lines: setpoint,
-// current temperature, fan duty, and the IP address in a smaller font.
+// Text is positioned by its top edge (setFontPosTop in setup) and centered
+// across the panel's width.
+void drawCentered(int y, const String &text) {
+  display.drawStr((DISPLAY_WIDTH - display.getStrWidth(text.c_str())) / 2, y, text.c_str());
+}
+
+// The portrait panel is only 40 pixels wide -- six characters of the 6x10
+// font -- so each reading gets a tiny label above its value rather than
+// sharing a line with it. Current temperature is the largest. The IP address
+// is too wide for one line and is split after its second octet.
 void updateDisplay() {
   display.firstPage();
   do {
-    display.setFont(u8g2_font_6x10_tf);
     if (flashUntilMs != 0) {
-      display.drawStr(0, 16, flashLine1.c_str());
-      display.drawStr(0, 30, flashLine2.c_str());
+      display.setFont(u8g2_font_6x10_tf);
+      drawCentered(24, flashLine1);
+      display.setFont(u8g2_font_7x13B_tf);
+      drawCentered(38, flashLine2);
       continue;
     }
-    display.drawStr(0, 9, ("Set " + String(setpointC, 1)).c_str());
-    display.drawStr(0, 19, (isnan(temperatureC) ? "Now fault" : "Now " + String(temperatureC, 1)).c_str());
-    display.drawStr(0, 29, (fanDutyPercent == 0 ? String("Fan idle")
-                                                : "Fan " + String(fanDutyPercent) + "%").c_str());
+    display.setFont(u8g2_font_4x6_tf);
+    drawCentered(0, "NOW");
+    drawCentered(20, "SET");
+    drawCentered(37, "FAN");
+    display.setFont(u8g2_font_7x13B_tf);
+    drawCentered(7, isnan(temperatureC) ? String("fault") : String(temperatureC, 1));
+    display.setFont(u8g2_font_6x10_tf);
+    drawCentered(27, String(setpointC, 1));
+    drawCentered(44, fanDutyPercent == 0 ? String("idle") : String(fanDutyPercent) + "%");
+    const String ip = WiFi.localIP().toString();
+    const int split = ip.indexOf('.', ip.indexOf('.') + 1) + 1;
     display.setFont(u8g2_font_5x8_tf);
-    display.drawStr(0, 39, WiFi.localIP().toString().c_str());
+    drawCentered(55, ip.substring(0, split));
+    drawCentered(63, ip.substring(split));
   } while (display.nextPage());
 }
 
@@ -283,11 +311,11 @@ void handleButtons() {
   if (upDown && downDown) {
     if (!buttonComboHandled) {
       buttonComboHandled = true;
-      showFlash("Printer", "LED...");
+      showFlash("LIGHT", "...");
       if (togglePrinterLed()) {
-        showFlash("Printer LED", printerLedOn ? "ON" : "OFF");
+        showFlash("LIGHT", printerLedOn ? "ON" : "OFF");
       } else {
-        showFlash("Printer", "no reply");
+        showFlash("LIGHT", "fail");
       }
     }
     return;
@@ -384,11 +412,13 @@ void setup() {
 
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   display.begin();
-  display.setFont(u8g2_font_6x10_tf);
+  display.setFontPosTop();
   display.firstPage();
   do {
-    display.drawStr(0, 12, "AD5X");
-    display.drawStr(0, 26, "Wi-Fi...");
+    display.setFont(u8g2_font_7x13B_tf);
+    drawCentered(22, "AD5X");
+    display.setFont(u8g2_font_5x8_tf);
+    drawCentered(40, "Wi-Fi...");
   } while (display.nextPage());
 
   preferences.begin("chamber", false);
