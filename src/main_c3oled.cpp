@@ -17,10 +17,10 @@
 // try 8 and 9 here.
 constexpr uint8_t OLED_SDA_PIN = 5;
 constexpr uint8_t OLED_SCL_PIN = 6;
-constexpr uint8_t THERMISTOR_PIN = 1;   // ADC1_CH1
-constexpr uint8_t FAN_PIN = 10;
-constexpr uint8_t BUTTON_UP_PIN = 0;
-constexpr uint8_t BUTTON_DOWN_PIN = 3;
+constexpr uint8_t THERMISTOR_PIN = 2;   // ADC1_CH1
+constexpr uint8_t FAN_PIN = 20;
+constexpr uint8_t BUTTON_UP_PIN = 1;
+constexpr uint8_t BUTTON_DOWN_PIN = 4;
 
 constexpr uint8_t DISPLAY_WIDTH = 72;
 constexpr uint8_t DISPLAY_HEIGHT = 40;
@@ -62,11 +62,21 @@ constexpr float DEFAULT_TOP_OFFSET_C = 3.0f;
 constexpr float DEFAULT_BOTTOM_OFFSET_C = 1.0f;
 constexpr unsigned long SAMPLE_INTERVAL_MS = 2000;
 constexpr float SETPOINT_STEP_C = 0.5f;
-constexpr unsigned long BUTTON_DEBOUNCE_MS = 250;
-// A single button only acts once it has been down this long on its own, so
-// that a two-button press whose halves land a few milliseconds apart toggles
-// the printer LED instead of first nudging the setpoint.
-constexpr unsigned long BUTTON_COMBO_GUARD_MS = 120;
+// A button's raw level has to hold steady this long before a press or release
+// counts, which rides out contact bounce and electrical noise alike.
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 20;
+// Holding a button repeats its step, after an initial pause.
+constexpr unsigned long BUTTON_REPEAT_DELAY_MS = 500;
+constexpr unsigned long BUTTON_REPEAT_INTERVAL_MS = 150;
+// A single press steps the setpoint straight away. If the other button joins
+// within this window, the pair is taken as a two-button combo that toggles the
+// printer LED, and the first button's step is taken back.
+constexpr unsigned long BUTTON_COMBO_WINDOW_MS = 250;
+static_assert(BUTTON_REPEAT_DELAY_MS > BUTTON_COMBO_WINDOW_MS,
+              "a combo undoes only one step, so no repeat may fire inside the window");
+// Button changes are written to flash once the setpoint has stayed put this
+// long, rather than on every step.
+constexpr unsigned long SETPOINT_SAVE_DELAY_MS = 3000;
 
 // ---------------------------------------------------------------------------
 // Printer LED control -- pressing both buttons at once toggles the AD5X's
@@ -105,15 +115,26 @@ float maxFanSpeedPercent = FAN_SPEED_CAP_DEFAULT_PERCENT;
 float temperatureC = NAN;
 uint8_t fanDutyPercent = 0;
 unsigned long lastSampleMs = 0;
-unsigned long lastButtonUpMs = 0;
-unsigned long lastButtonDownMs = 0;
-unsigned long buttonUpSinceMs = 0;
-unsigned long buttonDownSinceMs = 0;
-bool buttonUpHeld = false;
-bool buttonDownHeld = false;
+
+struct Button {
+  uint8_t pin;
+  float stepC;
+  bool pressed;       // debounced state
+  bool rawPressed;    // last raw reading
+  unsigned long rawChangedMs;
+  unsigned long pressedAtMs;
+  unsigned long nextRepeatMs;
+};
+Button buttonUp = {BUTTON_UP_PIN, SETPOINT_STEP_C};
+Button buttonDown = {BUTTON_DOWN_PIN, -SETPOINT_STEP_C};
 // Set when both buttons are down together, cleared only once both are
 // released, so one long two-button press toggles the LED exactly once.
 bool buttonComboHandled = false;
+// The setpoint as it stood before the latest single press stepped it, so that
+// step can be undone if the press turns out to open a combo.
+float setpointBeforePressC = DEFAULT_SETPOINT_C;
+bool setpointUnsaved = false;
+unsigned long setpointChangedMs = 0;
 
 String printerHost = DEFAULT_PRINTER_HOST;
 uint16_t printerPort = DEFAULT_PRINTER_PORT;
@@ -258,60 +279,79 @@ bool togglePrinterLed() {
   return ok;
 }
 
-void adjustSetpoint(float deltaC) {
-  setpointC = constrain(setpointC + deltaC, SETPOINT_MIN_C, SETPOINT_MAX_C);
-  persistSettings();
+// Apply a setpoint from the buttons. The flash write is left to loop(), so a
+// step never waits on it.
+void setSetpoint(float valueC) {
+  setpointC = constrain(valueC, SETPOINT_MIN_C, SETPOINT_MAX_C);
+  setpointUnsaved = true;
+  setpointChangedMs = millis();
+  // Show the new value at once, even over a confirmation message.
+  flashUntilMs = 0;
   updateFan();
   updateDisplay();
 }
 
+// Sample one button and return true on the pass where it becomes pressed.
+bool debounceButton(Button &button, unsigned long now) {
+  const bool raw = digitalRead(button.pin) == LOW;
+  if (raw != button.rawPressed) {
+    button.rawPressed = raw;
+    button.rawChangedMs = now;
+  }
+  if (raw == button.pressed || now - button.rawChangedMs < BUTTON_DEBOUNCE_MS) {
+    return false;
+  }
+  button.pressed = raw;
+  if (raw) {
+    button.pressedAtMs = now;
+    button.nextRepeatMs = now + BUTTON_REPEAT_DELAY_MS;
+  }
+  return raw;
+}
+
 void handleButtons() {
   const unsigned long now = millis();
-  const bool upDown = digitalRead(BUTTON_UP_PIN) == LOW;
-  const bool downDown = digitalRead(BUTTON_DOWN_PIN) == LOW;
+  const bool upJustPressed = debounceButton(buttonUp, now);
+  const bool downJustPressed = debounceButton(buttonDown, now);
 
-  if (upDown && !buttonUpHeld) {
-    buttonUpSinceMs = now;
-  }
-  if (downDown && !buttonDownHeld) {
-    buttonDownSinceMs = now;
-  }
-  buttonUpHeld = upDown;
-  buttonDownHeld = downDown;
-
-  // Both buttons: toggle the printer's chamber light, once per press.
-  if (upDown && downDown) {
-    if (!buttonComboHandled) {
-      buttonComboHandled = true;
-      showFlash("Printer", "LED...");
-      if (togglePrinterLed()) {
-        showFlash("Printer LED", printerLedOn ? "ON" : "OFF");
-      } else {
-        showFlash("Printer", "no reply");
-      }
-    }
+  if (!buttonUp.pressed && !buttonDown.pressed) {
+    buttonComboHandled = false;
     return;
   }
   if (buttonComboHandled) {
     // Ignore whichever button is still down after the combo, so releasing
     // them a moment apart does not move the setpoint.
-    if (!upDown && !downDown) {
-      buttonComboHandled = false;
-      lastButtonUpMs = now;
-      lastButtonDownMs = now;
+    return;
+  }
+
+  // Both buttons: toggle the printer's chamber light, once per press.
+  if (buttonUp.pressed && buttonDown.pressed) {
+    buttonComboHandled = true;
+    // Unless both went down on this very pass, the first one has already
+    // stepped the setpoint. If the second followed close behind, the pair was
+    // meant as a combo all along, so take that step back.
+    if (upJustPressed != downJustPressed) {
+      const Button &first = upJustPressed ? buttonDown : buttonUp;
+      if (now - first.pressedAtMs <= BUTTON_COMBO_WINDOW_MS) {
+        setSetpoint(setpointBeforePressC);
+      }
+    }
+    showFlash("Printer", "LED...");
+    if (togglePrinterLed()) {
+      showFlash("Printer LED", printerLedOn ? "ON" : "OFF");
+    } else {
+      showFlash("Printer", "no reply");
     }
     return;
   }
 
-  if (upDown && now - buttonUpSinceMs >= BUTTON_COMBO_GUARD_MS
-      && now - lastButtonUpMs >= BUTTON_DEBOUNCE_MS) {
-    lastButtonUpMs = now;
-    adjustSetpoint(SETPOINT_STEP_C);
-  }
-  if (downDown && now - buttonDownSinceMs >= BUTTON_COMBO_GUARD_MS
-      && now - lastButtonDownMs >= BUTTON_DEBOUNCE_MS) {
-    lastButtonDownMs = now;
-    adjustSetpoint(-SETPOINT_STEP_C);
+  Button &button = buttonUp.pressed ? buttonUp : buttonDown;
+  if (upJustPressed || downJustPressed) {
+    setpointBeforePressC = setpointC;
+    setSetpoint(setpointC + button.stepC);
+  } else if (static_cast<long>(now - button.nextRepeatMs) >= 0) {
+    button.nextRepeatMs = now + BUTTON_REPEAT_INTERVAL_MS;
+    setSetpoint(setpointC + button.stepC);
   }
 }
 
@@ -402,7 +442,12 @@ void setup() {
 
   WiFi.setHostname("AD5X-Chamber");
   AsyncWiFiManager wifiManager(&server, &dns);
-  wifiManager.autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD);
+ if (!wifiManager.autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD)) {
+    Serial.println("Wi-Fi setup failed; restarting.");
+    delay(1000);
+    ESP.restart();
+  }
+  WiFi.setAutoReconnect(true);
   Serial.print("Open http://");
   Serial.println(WiFi.localIP());
 
@@ -421,6 +466,11 @@ void loop() {
   if (flashUntilMs != 0 && static_cast<long>(millis() - flashUntilMs) >= 0) {
     flashUntilMs = 0;
     updateDisplay();
+  }
+
+  if (setpointUnsaved && millis() - setpointChangedMs >= SETPOINT_SAVE_DELAY_MS) {
+    setpointUnsaved = false;
+    preferences.putFloat("setpoint", setpointC);
   }
 
   if (millis() - lastSampleMs >= SAMPLE_INTERVAL_MS) {
