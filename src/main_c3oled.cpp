@@ -1,12 +1,12 @@
 #include <Arduino.h>
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
-#include <ESPAsyncWiFiManager.h>
 #include <Preferences.h>
 #include <U8g2lib.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Wire.h>
+#include <esp_wifi.h>
 
 // Generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED.
 //
@@ -48,8 +48,20 @@ constexpr uint8_t DISPLAY_HEIGHT = 40;
 #define FAN_SPEED_CAP_MIN_PERCENT 25.0f
 #define FAN_SPEED_CAP_DEFAULT_PERCENT 100.0f
 
+// ---------------------------------------------------------------------------
+// Wi-Fi is optional: the regulator and its buttons run from power-on whether
+// or not a network ever shows up. The saved network is joined in the
+// background, and if there is none, or it stays out of reach for
+// WIFI_SETUP_AP_DELAY_MS, the board also opens its own setup network, whose
+// web page (captive portal) takes new credentials.
+// ---------------------------------------------------------------------------
 constexpr char SETUP_AP_NAME[] = "AD5X-Chamber-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "chamber123";
+constexpr unsigned long WIFI_SETUP_AP_DELAY_MS = 30000;
+// While the setup network is up, the saved network is retried this often
+// rather than continuously, since each attempt scans every channel and knocks
+// phones off the setup network while it does.
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr float SERIES_RESISTOR_OHMS = 100000.0f;
 constexpr float THERMISTOR_NOMINAL_OHMS = 100000.0f;
 constexpr float NOMINAL_TEMPERATURE_C = 25.0f;
@@ -146,6 +158,16 @@ String flashLine1;
 String flashLine2;
 unsigned long flashUntilMs = 0;
 
+bool wifiConnected = false;
+bool setupApActive = false;
+unsigned long wifiDownSinceMs = 0;
+unsigned long lastWifiAttemptMs = 0;
+// Credentials from the web page, handed to loop() because the web server runs
+// on its own task.
+String pendingWifiSsid;
+String pendingWifiPassword;
+volatile bool wifiCredentialsPending = false;
+
 float readTemperatureC() {
   const int raw = analogRead(THERMISTOR_PIN);
   if (raw <= 0 || raw >= 4095) {
@@ -197,8 +219,20 @@ void persistSettings() {
   preferences.putUShort("printerPort", printerPort);
 }
 
+// The address to browse to, if there is one: the board's IP on the home
+// network, or the setup network's own address while that is up.
+String networkLine() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return WiFi.localIP().toString();
+  }
+  if (setupApActive) {
+    return "AP " + WiFi.softAPIP().toString();
+  }
+  return String();
+}
+
 // The panel is only 72x40, so the layout is four tight lines: setpoint,
-// current temperature, fan duty, and the IP address in a smaller font.
+// current temperature, fan duty, and the network address in a smaller font.
 void updateDisplay() {
   display.firstPage();
   do {
@@ -213,7 +247,7 @@ void updateDisplay() {
     display.drawStr(0, 29, (fanDutyPercent == 0 ? String("Fan idle")
                                                 : "Fan " + String(fanDutyPercent) + "%").c_str());
     display.setFont(u8g2_font_5x8_tf);
-    display.drawStr(0, 39, WiFi.localIP().toString().c_str());
+    display.drawStr(0, 39, networkLine().c_str());
   } while (display.nextPage());
 }
 
@@ -336,6 +370,10 @@ void handleButtons() {
         setSetpoint(setpointBeforePressC);
       }
     }
+    if (WiFi.status() != WL_CONNECTED) {
+      showFlash("Printer", "no Wi-Fi");
+      return;
+    }
     showFlash("Printer", "LED...");
     if (togglePrinterLed()) {
       showFlash("Printer LED", printerLedOn ? "ON" : "OFF");
@@ -352,6 +390,86 @@ void handleButtons() {
   } else if (static_cast<long>(now - button.nextRepeatMs) >= 0) {
     button.nextRepeatMs = now + BUTTON_REPEAT_INTERVAL_MS;
     setSetpoint(setpointC + button.stepC);
+  }
+}
+
+bool hasSavedWifiNetwork() {
+  wifi_config_t config;
+  return esp_wifi_get_config(WIFI_IF_STA, &config) == ESP_OK && config.sta.ssid[0] != '\0';
+}
+
+void startSetupAp() {
+  // Retries are paced by serviceWifi() while the setup network is up.
+  WiFi.setAutoReconnect(false);
+  WiFi.softAP(SETUP_AP_NAME, SETUP_AP_PASSWORD);
+  dns.start(53, "*", WiFi.softAPIP());
+  setupApActive = true;
+  lastWifiAttemptMs = millis();
+  Serial.printf("Wi-Fi setup network %s is up at http://%s\n", SETUP_AP_NAME,
+                WiFi.softAPIP().toString().c_str());
+  updateDisplay();
+}
+
+void stopSetupAp() {
+  dns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.setAutoReconnect(true);
+  setupApActive = false;
+  updateDisplay();
+}
+
+// Start joining the saved network without waiting for the result; there is
+// no saved network on first boot, so go straight to the setup network then.
+void startWifi() {
+  WiFi.setHostname("AD5X-Chamber");
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  wifiDownSinceMs = millis();
+  if (hasSavedWifiNetwork()) {
+    WiFi.begin();
+  } else {
+    startSetupAp();
+  }
+}
+
+// Called every loop pass. Nothing here waits on the network.
+void serviceWifi() {
+  const unsigned long now = millis();
+
+  if (wifiCredentialsPending) {
+    wifiCredentialsPending = false;
+    Serial.printf("Joining Wi-Fi network %s\n", pendingWifiSsid.c_str());
+    WiFi.begin(pendingWifiSsid.c_str(), pendingWifiPassword.c_str());
+    lastWifiAttemptMs = now;
+  }
+
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  if (connected != wifiConnected) {
+    wifiConnected = connected;
+    if (connected) {
+      Serial.print("Wi-Fi connected: http://");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("Wi-Fi disconnected.");
+    }
+    updateDisplay();
+  }
+
+  if (connected) {
+    wifiDownSinceMs = now;
+    if (setupApActive) {
+      stopSetupAp();
+    }
+    return;
+  }
+
+  if (!setupApActive) {
+    if (now - wifiDownSinceMs >= WIFI_SETUP_AP_DELAY_MS) {
+      startSetupAp();
+    }
+  } else if (now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS && hasSavedWifiNetwork()) {
+    lastWifiAttemptMs = now;
+    WiFi.reconnect();
   }
 }
 
@@ -372,7 +490,29 @@ String page() {
       + String(maxFanSpeedPercent, 0) + F("'></label><label>Printer host<input name='printerhost' type='text' value='")
       + printerHost + F("'></label><label>Printer port<input name='printerport' type='number' min='1' max='65535' value='")
       + String(printerPort) + F("'></label><p>Press both buttons together to toggle the printer LED (last set <span class='state'>")
-      + (printerLedOn ? F("ON") : F("OFF")) + F("</span>).</p><button type='submit'>Save settings</button></form></main></body></html>");
+      + (printerLedOn ? F("ON") : F("OFF")) + F("</span>).</p><button type='submit'>Save settings</button></form>"
+           "<form method='post' action='/wifi'><h2>Wi-Fi</h2><p>")
+      + (WiFi.status() == WL_CONNECTED ? "Connected to " + WiFi.SSID() : String(F("Not connected")))
+      + F("</p><label>Network name<input name='ssid' type='text' required></label>"
+          "<label>Password<input name='password' type='password'></label>"
+          "<button type='submit'>Join network</button></form></main></body></html>");
+}
+
+void handleWifi(AsyncWebServerRequest *request) {
+  String ssid = request->hasParam("ssid", true) ? request->getParam("ssid", true)->value() : String();
+  ssid.trim();
+  if (ssid.length() == 0) {
+    request->redirect("/");
+    return;
+  }
+  pendingWifiSsid = ssid;
+  pendingWifiPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : String();
+  wifiCredentialsPending = true;
+  request->send(200, "text/html", F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+      "<title>AD5X Chamber</title><style>body{font-family:system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem;color:#17212b}</style>"
+      "</head><body><h1>Joining Wi-Fi&hellip;</h1><p>If it connects, the setup network closes and the chamber's new "
+      "address appears on the bottom line of its display. If it doesn't, the setup network stays up so you can try again.</p>"
+      "</body></html>"));
 }
 
 void handleSettings(AsyncWebServerRequest *request) {
@@ -422,15 +562,6 @@ void setup() {
   pinMode(BUTTON_UP_PIN, INPUT_PULLUP);
   pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);
 
-  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-  display.begin();
-  display.setFont(u8g2_font_6x10_tf);
-  display.firstPage();
-  do {
-    display.drawStr(0, 12, "AD5X");
-    display.drawStr(0, 26, "Wi-Fi...");
-  } while (display.nextPage());
-
   preferences.begin("chamber", false);
   setpointC = preferences.getFloat("setpoint", DEFAULT_SETPOINT_C);
   topOffsetC = preferences.getFloat("topOffset", DEFAULT_TOP_OFFSET_C);
@@ -440,28 +571,38 @@ void setup() {
   printerPort = preferences.getUShort("printerPort", DEFAULT_PRINTER_PORT);
   printerLedOn = preferences.getBool("printerLedOn", true);
 
-  WiFi.setHostname("AD5X-Chamber");
-  AsyncWiFiManager wifiManager(&server, &dns);
- if (!wifiManager.autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD)) {
-    Serial.println("Wi-Fi setup failed; restarting.");
-    delay(1000);
-    ESP.restart();
-  }
-  WiFi.setAutoReconnect(true);
-  Serial.print("Open http://");
-  Serial.println(WiFi.localIP());
+  // Take a first reading so the main screen and fan are live straight away.
+  lastSampleMs = millis();
+  temperatureC = readTemperatureC();
+  updateFan();
 
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  display.begin();
   updateDisplay();
+
+  // Brings up the network stack, which the web server needs before begin().
+  startWifi();
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", page());
   });
   server.on("/settings", HTTP_POST, handleSettings);
+  server.on("/wifi", HTTP_POST, handleWifi);
+  // Send every other request on the setup network to the page, which is what
+  // makes phones pop it up as a sign-in page.
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    if (setupApActive && ON_AP_FILTER(request)) {
+      request->redirect("http://" + WiFi.softAPIP().toString() + "/");
+    } else {
+      request->send(404);
+    }
+  });
   server.begin();
 }
 
 void loop() {
   handleButtons();
+  serviceWifi();
 
   if (flashUntilMs != 0 && static_cast<long>(millis() - flashUntilMs) >= 0) {
     flashUntilMs = 0;
