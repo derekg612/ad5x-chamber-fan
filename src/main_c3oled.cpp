@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Wire.h>
+#include <driver/gpio.h>
 
 // Generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED.
 //
@@ -36,10 +37,16 @@ constexpr uint8_t DISPLAY_HEIGHT = 40;
 // Set FAN_PWM_ENABLED to 0 to fall back to plain on/off switching.
 // ---------------------------------------------------------------------------
 #define FAN_PWM_ENABLED 1
-// 25 kHz keeps switching above the audible band. Lower it (e.g. 1000) if the
-// transistor runs hot -- switching loss scales with frequency.
-#define FAN_PWM_FREQUENCY_HZ 25000
-#define FAN_PWM_RESOLUTION_BITS 8
+// Slow PWM, because a 2-wire fan powers its own commutation electronics from
+// the supply being chopped. Fast PWM starves them in every off gap -- at 25 kHz
+// this fan only ran above about 98% duty. At 30 Hz each pulse is long enough to
+// drive the motor, and the rotor's inertia smooths the pulses into a speed, at
+// the cost of a faint tick at low duty.
+#define FAN_PWM_FREQUENCY_HZ 30
+// The LEDC timer divides its 40 MHz clock by at most 1024, so the resolution
+// sets the lowest reachable frequency: 8 bits bottoms out near 150 Hz, 12 bits
+// near 10 Hz. The C3 allows up to 14.
+#define FAN_PWM_RESOLUTION_BITS 12
 // Small fans stall or stutter below roughly this duty, so once the fan is
 // asked to run at all it ramps from this floor rather than from zero.
 #define FAN_MIN_DUTY_PERCENT 25.0f
@@ -54,7 +61,16 @@ constexpr float SERIES_RESISTOR_OHMS = 100000.0f;
 constexpr float THERMISTOR_NOMINAL_OHMS = 100000.0f;
 constexpr float NOMINAL_TEMPERATURE_C = 25.0f;
 constexpr float THERMISTOR_BETA = 3950.0f;
-constexpr float ADC_REFERENCE_VOLTS = 3.3f;
+// The divider's supply. The ADC's own full scale is lower and not linear, so
+// the pin voltage comes from the calibrated reading instead.
+constexpr float DIVIDER_SUPPLY_VOLTS = 3.3f;
+// With the pin's internal pull-down (~45 kOhm) switched on, a connected
+// thermistor still holds it at about 0.3 V even at 0 C, but a missing one --
+// or a missing divider, leaving the pin floating -- lets it fall to ground.
+// Readings at or below this count as disconnected.
+constexpr int THERMISTOR_OPEN_MAX_RAW = 100;
+// Long enough for the pull-down to drain the 100 nF filter capacitor.
+constexpr unsigned long THERMISTOR_PROBE_SETTLE_MS = 25;
 constexpr float SETPOINT_MIN_C = 10.0f;
 constexpr float SETPOINT_MAX_C = 60.0f;
 constexpr float DEFAULT_SETPOINT_C = 35.0f;
@@ -146,16 +162,35 @@ String flashLine1;
 String flashLine2;
 unsigned long flashUntilMs = 0;
 
+// A missing thermistor otherwise shows up as a meaningless temperature rather
+// than a fault: with only the fixed resistor left, ADC noise keeps the reading
+// a few counts off zero, and a floating pin reads anywhere. analogRead() only
+// resets the pad's pulls when it first sets up the channel, so the pull-down
+// set here holds for the probe read. The next reading is a full sample
+// interval away, by which time the pin has long since recovered.
+bool thermistorDisconnected() {
+  const gpio_num_t pin = static_cast<gpio_num_t>(THERMISTOR_PIN);
+  gpio_pulldown_en(pin);
+  delay(THERMISTOR_PROBE_SETTLE_MS);
+  const int raw = analogRead(THERMISTOR_PIN);
+  gpio_pulldown_dis(pin);
+  return raw <= THERMISTOR_OPEN_MAX_RAW;
+}
+
 float readTemperatureC() {
   const int raw = analogRead(THERMISTOR_PIN);
-  if (raw <= 0 || raw >= 4095) {
+  // Scaling raw counts against 3.3 V read about 5 C high: at this attenuation
+  // the C3 saturates near 3 V, and not linearly. analogReadMilliVolts()
+  // applies the chip's factory calibration instead. It has to come before the
+  // probe below, which disturbs the pin.
+  const float voltage = analogReadMilliVolts(THERMISTOR_PIN) / 1000.0f;
+  if (raw <= 0 || raw >= 4095 || voltage <= 0.0f || thermistorDisconnected()) {
     return NAN;
   }
 
-  const float voltage = (static_cast<float>(raw) / 4095.0f) * ADC_REFERENCE_VOLTS;
   // The thermistor is the divider's high side (3V3 -> NTC -> pin -> fixed
   // resistor -> GND), so the pin voltage rises as it warms.
-  const float resistance = SERIES_RESISTOR_OHMS * (ADC_REFERENCE_VOLTS - voltage) / voltage;
+  const float resistance = SERIES_RESISTOR_OHMS * (DIVIDER_SUPPLY_VOLTS - voltage) / voltage;
   const float steinhart = log(resistance / THERMISTOR_NOMINAL_OHMS) / THERMISTOR_BETA
       + 1.0f / (NOMINAL_TEMPERATURE_C + 273.15f);
   return 1.0f / steinhart - 273.15f;
@@ -419,7 +454,9 @@ void setup() {
   // it. Drop what doesn't fit instead.
   Serial.setTxTimeoutMs(0);
 #if FAN_PWM_ENABLED
-  ledcAttach(FAN_PIN, FAN_PWM_FREQUENCY_HZ, FAN_PWM_RESOLUTION_BITS);
+  if (!ledcAttach(FAN_PIN, FAN_PWM_FREQUENCY_HZ, FAN_PWM_RESOLUTION_BITS)) {
+    Serial.println("Fan PWM setup failed; check the frequency/resolution pair.");
+  }
   ledcWrite(FAN_PIN, 0);
 #else
   pinMode(FAN_PIN, OUTPUT);
