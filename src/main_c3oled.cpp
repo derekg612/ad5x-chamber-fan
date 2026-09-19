@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Wire.h>
+#include <algorithm>
 #include <driver/gpio.h>
 
 // Generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED.
@@ -55,6 +56,23 @@ constexpr uint8_t DISPLAY_HEIGHT = 40;
 #define FAN_SPEED_CAP_MIN_PERCENT 25.0f
 #define FAN_SPEED_CAP_DEFAULT_PERCENT 100.0f
 
+// ---------------------------------------------------------------------------
+// Air sampling -- chamber air only moves while the fan runs, so a thermistor
+// sitting in still air drifts away from the chamber's real temperature. The
+// fan is run briefly at a low speed on its own cycle to draw fresh air past
+// the sensor, whatever the thermostat is asking for. All three knobs are on
+// the settings page; a run time or speed of 0 turns sampling off.
+//
+// The sampling speed is deliberately gentler than FAN_MIN_DUTY_PERCENT, which
+// is about a fan ramping under thermostat control. Raise it if the fan won't
+// spin up at this duty.
+// ---------------------------------------------------------------------------
+constexpr unsigned long DEFAULT_AIR_SAMPLE_INTERVAL_S = 60;
+constexpr unsigned long DEFAULT_AIR_SAMPLE_DURATION_S = 10;
+constexpr float DEFAULT_AIR_SAMPLE_PERCENT = 20.0f;
+constexpr unsigned long AIR_SAMPLE_INTERVAL_MIN_S = 10;
+constexpr unsigned long AIR_SAMPLE_INTERVAL_MAX_S = 3600;
+
 constexpr char SETUP_AP_NAME[] = "AD5X-Chamber-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "chamber123";
 constexpr float SERIES_RESISTOR_OHMS = 100000.0f;
@@ -77,6 +95,26 @@ constexpr float DEFAULT_SETPOINT_C = 35.0f;
 constexpr float DEFAULT_TOP_OFFSET_C = 3.0f;
 constexpr float DEFAULT_BOTTOM_OFFSET_C = 1.0f;
 constexpr unsigned long SAMPLE_INTERVAL_MS = 2000;
+// ---------------------------------------------------------------------------
+// Temperature smoothing. The divider's ~50 kOhm source impedance, fan
+// switching and Wi-Fi bursts together put a few tens of millivolts of noise on
+// the pin, and the ramp turns 1 C into 19% of fan duty, so an unfiltered
+// reading makes the fan hunt.
+//
+// Each sample is a trimmed mean of several readings spread over a little more
+// than one fan PWM period, so no single phase of the fan's switching colours
+// the result, and the extremes are dropped before averaging. Successive
+// samples then feed an exponential filter: TEMPERATURE_FILTER_TAU_S is how
+// long it takes to cover about 63% of a step, so it trades how quickly a real
+// change shows up against how much noise survives. At 20 s, a 1 C jitter comes
+// out at about 0.2 C and a real step is 90% covered in 45 s -- fast next to a
+// chamber that takes minutes to move.
+// ---------------------------------------------------------------------------
+constexpr int TEMPERATURE_SAMPLES = 21;
+constexpr unsigned long TEMPERATURE_SAMPLE_SPACING_MS = 2;
+static_assert((TEMPERATURE_SAMPLES - 1) * TEMPERATURE_SAMPLE_SPACING_MS * FAN_PWM_FREQUENCY_HZ >= 1000,
+              "the readings have to span at least one fan PWM period");
+constexpr float TEMPERATURE_FILTER_TAU_S = 20.0f;
 constexpr float SETPOINT_STEP_C = 0.5f;
 // A button's raw level has to hold steady this long before a press or release
 // counts, which rides out contact bounce and electrical noise alike.
@@ -128,6 +166,13 @@ float setpointC = DEFAULT_SETPOINT_C;
 float topOffsetC = DEFAULT_TOP_OFFSET_C;
 float bottomOffsetC = DEFAULT_BOTTOM_OFFSET_C;
 float maxFanSpeedPercent = FAN_SPEED_CAP_DEFAULT_PERCENT;
+unsigned long airSampleIntervalS = DEFAULT_AIR_SAMPLE_INTERVAL_S;
+unsigned long airSampleDurationS = DEFAULT_AIR_SAMPLE_DURATION_S;
+float airSamplePercent = DEFAULT_AIR_SAMPLE_PERCENT;
+// Start of the current sampling cycle. The run is its first
+// airSampleDurationS; the rest of the interval is quiet.
+unsigned long airSampleStartedMs = 0;
+bool airSampleActive = false;
 float temperatureC = NAN;
 uint8_t fanDutyPercent = 0;
 unsigned long lastSampleMs = 0;
@@ -177,13 +222,34 @@ bool thermistorDisconnected() {
   return raw <= THERMISTOR_OPEN_MAX_RAW;
 }
 
+// Millivolts at the thermistor pin, with the noise averaged out of them.
+float thermistorMilliVolts() {
+  int samples[TEMPERATURE_SAMPLES];
+  for (int i = 0; i < TEMPERATURE_SAMPLES; ++i) {
+    if (i > 0) {
+      delay(TEMPERATURE_SAMPLE_SPACING_MS);
+    }
+    samples[i] = static_cast<int>(analogReadMilliVolts(THERMISTOR_PIN));
+  }
+  std::sort(samples, samples + TEMPERATURE_SAMPLES);
+
+  // Average what is left after dropping the outermost third at each end.
+  constexpr int trim = TEMPERATURE_SAMPLES / 3;
+  constexpr int kept = TEMPERATURE_SAMPLES - 2 * trim;
+  long total = 0;
+  for (int i = trim; i < TEMPERATURE_SAMPLES - trim; ++i) {
+    total += samples[i];
+  }
+  return static_cast<float>(total) / kept;
+}
+
 float readTemperatureC() {
   const int raw = analogRead(THERMISTOR_PIN);
   // Scaling raw counts against 3.3 V read about 5 C high: at this attenuation
   // the C3 saturates near 3 V, and not linearly. analogReadMilliVolts()
   // applies the chip's factory calibration instead. It has to come before the
   // probe below, which disturbs the pin.
-  const float voltage = analogReadMilliVolts(THERMISTOR_PIN) / 1000.0f;
+  const float voltage = thermistorMilliVolts() / 1000.0f;
   if (raw <= 0 || raw >= 4095 || voltage <= 0.0f || thermistorDisconnected()) {
     return NAN;
   }
@@ -194,6 +260,18 @@ float readTemperatureC() {
   const float steinhart = log(resistance / THERMISTOR_NOMINAL_OHMS) / THERMISTOR_BETA
       + 1.0f / (NOMINAL_TEMPERATURE_C + 273.15f);
   return 1.0f / steinhart - 273.15f;
+}
+
+// Blends a new reading into the running temperature. A fault is passed
+// straight through, so the fan's fail-safe is never held up by the filter, and
+// the first reading after one starts the filter afresh rather than crawling
+// back from a stale value.
+float smoothedTemperature(float reading) {
+  if (isnan(reading) || isnan(temperatureC)) {
+    return reading;
+  }
+  const float alpha = 1.0f - expf(-(SAMPLE_INTERVAL_MS / 1000.0f) / TEMPERATURE_FILTER_TAU_S);
+  return temperatureC + alpha * (reading - temperatureC);
 }
 
 void updateFan() {
@@ -214,6 +292,12 @@ void updateFan() {
     requestedPercent = floorPercent + fraction * (maxFanSpeedPercent - floorPercent);
   }
 
+  // A sampling run sets a floor under what the thermostat wants, so it never
+  // slows a fan that is already cooling.
+  if (airSampleActive) {
+    requestedPercent = max(requestedPercent, airSamplePercent);
+  }
+
   fanDutyPercent = static_cast<uint8_t>(
       lroundf(constrain(requestedPercent, 0.0f, FAN_MAX_DUTY_PERCENT)));
 
@@ -230,6 +314,9 @@ void persistSettings() {
   preferences.putFloat("topOffset", topOffsetC);
   preferences.putFloat("bottomOffset", bottomOffsetC);
   preferences.putFloat("maxFanSpeed", maxFanSpeedPercent);
+  preferences.putULong("airSampIntvl", airSampleIntervalS);
+  preferences.putULong("airSampDur", airSampleDurationS);
+  preferences.putFloat("airSampPct", airSamplePercent);
   preferences.putString("printerHost", printerHost);
   preferences.putUShort("printerPort", printerPort);
 }
@@ -258,6 +345,23 @@ void showFlash(const char *line1, const char *line2) {
   flashLine1 = line1;
   flashLine2 = line2;
   flashUntilMs = millis() + FLASH_MESSAGE_MS;
+  updateDisplay();
+}
+
+// Opens a sampling run every airSampleIntervalS and closes it
+// airSampleDurationS later. Called every loop pass; nothing here blocks.
+void serviceAirSample() {
+  const unsigned long now = millis();
+  if (now - airSampleStartedMs >= airSampleIntervalS * 1000UL) {
+    airSampleStartedMs = now;
+  }
+  const bool active = airSamplePercent > 0.0f
+      && now - airSampleStartedMs < airSampleDurationS * 1000UL;
+  if (active == airSampleActive) {
+    return;
+  }
+  airSampleActive = active;
+  updateFan();
   updateDisplay();
 }
 
@@ -406,7 +510,13 @@ String page() {
       + String(topOffsetC, 1) + F("'></label><label>Lower threshold below target (&deg;C)<input name='bottom' type='number' step='0.5' min='0.5' max='20' value='")
       + String(bottomOffsetC, 1) + F("'></label><label>Maximum fan speed (%)<input name='maxfan' type='number' step='5' min='")
       + String(FAN_SPEED_CAP_MIN_PERCENT, 0) + F("' max='") + String(FAN_MAX_DUTY_PERCENT, 0) + F("' value='")
-      + String(maxFanSpeedPercent, 0) + F("'></label><label>Printer host<input name='printerhost' type='text' value='")
+      + String(maxFanSpeedPercent, 0) + F("'></label><label>Air sampling interval (s)<input name='sampinterval' type='number' min='")
+      + String(AIR_SAMPLE_INTERVAL_MIN_S) + F("' max='") + String(AIR_SAMPLE_INTERVAL_MAX_S) + F("' value='")
+      + String(airSampleIntervalS) + F("'></label><label>Air sampling run time (s, 0 is off)<input name='sampduration' type='number' min='0' max='")
+      + String(airSampleIntervalS) + F("' value='")
+      + String(airSampleDurationS) + F("'></label><label>Air sampling fan speed (%, 0 is off)<input name='samppercent' type='number' step='5' min='0' max='")
+      + String(FAN_MAX_DUTY_PERCENT, 0) + F("' value='")
+      + String(airSamplePercent, 0) + F("'></label><label>Printer host<input name='printerhost' type='text' value='")
       + printerHost + F("'></label><label>Printer port<input name='printerport' type='number' min='1' max='65535' value='")
       + String(printerPort) + F("'></label><p>Press both buttons together to toggle the printer LED (last set <span class='state'>")
       + (printerLedOn ? F("ON") : F("OFF")) + F("</span>).</p><button type='submit'>Save settings</button></form></main></body></html>");
@@ -425,6 +535,20 @@ void handleSettings(AsyncWebServerRequest *request) {
   if (request->hasParam("maxfan", true)) {
     maxFanSpeedPercent = constrain(request->getParam("maxfan", true)->value().toFloat(),
         FAN_SPEED_CAP_MIN_PERCENT, FAN_MAX_DUTY_PERCENT);
+  }
+  if (request->hasParam("sampinterval", true)) {
+    const long seconds = max(request->getParam("sampinterval", true)->value().toInt(), 0L);
+    airSampleIntervalS = constrain(static_cast<unsigned long>(seconds),
+        AIR_SAMPLE_INTERVAL_MIN_S, AIR_SAMPLE_INTERVAL_MAX_S);
+  }
+  if (request->hasParam("sampduration", true)) {
+    // A run longer than the interval would just leave the fan on for good.
+    const long seconds = max(request->getParam("sampduration", true)->value().toInt(), 0L);
+    airSampleDurationS = constrain(static_cast<unsigned long>(seconds), 0UL, airSampleIntervalS);
+  }
+  if (request->hasParam("samppercent", true)) {
+    airSamplePercent = constrain(request->getParam("samppercent", true)->value().toFloat(),
+        0.0f, FAN_MAX_DUTY_PERCENT);
   }
   if (request->hasParam("printerhost", true)) {
     String host = request->getParam("printerhost", true)->value();
@@ -481,6 +605,9 @@ void setup() {
   topOffsetC = preferences.getFloat("topOffset", DEFAULT_TOP_OFFSET_C);
   bottomOffsetC = preferences.getFloat("bottomOffset", DEFAULT_BOTTOM_OFFSET_C);
   maxFanSpeedPercent = preferences.getFloat("maxFanSpeed", FAN_SPEED_CAP_DEFAULT_PERCENT);
+  airSampleIntervalS = preferences.getULong("airSampIntvl", DEFAULT_AIR_SAMPLE_INTERVAL_S);
+  airSampleDurationS = preferences.getULong("airSampDur", DEFAULT_AIR_SAMPLE_DURATION_S);
+  airSamplePercent = preferences.getFloat("airSampPct", DEFAULT_AIR_SAMPLE_PERCENT);
   printerHost = preferences.getString("printerHost", DEFAULT_PRINTER_HOST);
   printerPort = preferences.getUShort("printerPort", DEFAULT_PRINTER_PORT);
   printerLedOn = preferences.getBool("printerLedOn", true);
@@ -507,6 +634,7 @@ void setup() {
 
 void loop() {
   handleButtons();
+  serviceAirSample();
 
   if (flashUntilMs != 0 && static_cast<long>(millis() - flashUntilMs) >= 0) {
     flashUntilMs = 0;
@@ -520,9 +648,11 @@ void loop() {
 
   if (millis() - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = millis();
-    temperatureC = readTemperatureC();
+    const float reading = readTemperatureC();
+    temperatureC = smoothedTemperature(reading);
     updateFan();
     updateDisplay();
-    Serial.printf("Temperature: %.1f C, fan: %u%%\n", temperatureC, fanDutyPercent);
+    Serial.printf("Temperature: %.1f C (reading %.1f), fan: %u%%\n", temperatureC, reading,
+                  fanDutyPercent);
   }
 }
