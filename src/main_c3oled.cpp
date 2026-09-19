@@ -432,7 +432,12 @@ void setup() {
 
   WiFi.setHostname("AD5X-Chamber");
   AsyncWiFiManager wifiManager(&server, &dns);
-  wifiManager.autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD);
+ if (!wifiManager.autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD)) {
+    Serial.println("Wi-Fi setup failed; restarting.");
+    delay(1000);
+    ESP.restart();
+  }
+  WiFi.setAutoReconnect(true);
   Serial.print("Open http://");
   Serial.println(WiFi.localIP());
 
