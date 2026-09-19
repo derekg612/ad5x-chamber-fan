@@ -18,12 +18,15 @@ Reserved, do not reuse:
 
 | GPIO | Function |
 | --- | --- |
-| IO8 | OLED I2C SDA (also a strapping pin -- must be high at reset) |
-| IO9 | OLED I2C SCL (also the boot-mode strapping pin) |
-| IO2, IO4-IO7 | Strapping / JTAG |
+| IO5 | OLED I2C SDA (also JTAG TDI) |
+| IO6 | OLED I2C SCL (also JTAG TCK) |
+| IO4, IO7 | JTAG |
+| IO2, IO8, IO9 | Strapping -- IO9 selects download mode at reset |
 | IO20, IO21 | UART0 console -- repurposing these breaks serial programming |
 
-The OLED sharing IO8/IO9 with strapping pins works because the I2C pull-ups hold both in the states the bootloader wants. It does mean you cannot put anything else on that bus without checking it doesn't disturb boot.
+The board reference puts the OLED on IO8/IO9, but on the board this was built with it is wired to IO5/IO6, and boards sold under this name vary. If the panel stays blank, set `OLED_SDA_PIN`/`OLED_SCL_PIN` in `src/main_c3oled.cpp` to 8/9 and try again.
+
+IO5/IO6 being JTAG pins is harmless: the C3 routes JTAG through its built-in USB by default, so they behave as ordinary GPIO, and the OLED's I2C pull-ups keep them from floating. IO8/IO9 are left unused, but they are still strapping pins, so don't add anything there that could pull them low at reset.
 
 ## Onboard LED caveat on IO0
 
@@ -59,9 +62,9 @@ Board references list an onboard LED on IO0, which is also where the setpoint-up
 
                          THERMISTOR INPUT (3.3 V ADC)
 
-             3V3 o----[ 10 kOhm NTC, Beta 3950 ]----+----[ 10 kOhm ]----o GND
-                                                     |
-                                                     +---------------------- IO1
+             3V3 o----[ 100 kOhm NTC, Beta 3950 ]----+----[ 100 kOhm ]----o GND
+                                                      |
+                                                      +--------------------- IO1
 
                          SETPOINT BUTTONS (momentary, to GND)
 
@@ -92,5 +95,6 @@ Setpoint, current temperature (or `Now fault`), fan duty (or `Fan idle`), and th
 
 - Same ground-bonding requirement as the other builds: run a dedicated ground wire from the AD5X mainboard's real power ground to this board's ground bus. Do not rely on the display ribbon cable's ground pin.
 - The 1N5819 flyback diode is required, installed directly across the fan.
+- The 100 kOhm divider has a source impedance of around 50 kOhm, which is high enough for the ADC's sampling capacitor and fan-switching noise to pull readings around. A 100 nF ceramic capacitor from IO1 to GND, placed at the board, steadies it.
 - An undriven IO10 (at boot, or if the firmware hangs) turns the fan off, not on. The firmware's sensor-fault fail-safe (full speed when the thermistor reading is invalid) still applies.
 - Do not connect 24 V to any board GPIO, `3V3`, or `5V` pin.

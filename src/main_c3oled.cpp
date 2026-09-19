@@ -12,11 +12,11 @@
 //
 // Only four pins on this board are free of strapping/JTAG/UART duty:
 // IO0, IO1, IO3 and IO10, and all four are used here. The OLED sits on
-// IO5/IO6, which are themselves strapping pins -- the I2C pull-ups hold them
-// in the states the bootloader needs, which is why they work, but it also
-// means neither can be reused.
-constexpr uint8_t OLED_SDA_PIN = 5;//8;
-constexpr uint8_t OLED_SCL_PIN = 6;//9;
+// IO5/IO6 (JTAG pins, usable as GPIO because JTAG goes over the built-in
+// USB). The board reference says IO8/IO9 instead; if the panel stays blank,
+// try 8 and 9 here.
+constexpr uint8_t OLED_SDA_PIN = 5;
+constexpr uint8_t OLED_SCL_PIN = 6;
 constexpr uint8_t THERMISTOR_PIN = 1;   // ADC1_CH1
 constexpr uint8_t FAN_PIN = 10;
 constexpr uint8_t BUTTON_UP_PIN = 0;
@@ -50,8 +50,8 @@ constexpr uint8_t DISPLAY_HEIGHT = 40;
 
 constexpr char SETUP_AP_NAME[] = "AD5X-Chamber-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "chamber123";
-constexpr float SERIES_RESISTOR_OHMS = 10000.0f;
-constexpr float THERMISTOR_NOMINAL_OHMS = 10000.0f;
+constexpr float SERIES_RESISTOR_OHMS = 100000.0f;
+constexpr float THERMISTOR_NOMINAL_OHMS = 100000.0f;
 constexpr float NOMINAL_TEMPERATURE_C = 25.0f;
 constexpr float THERMISTOR_BETA = 3950.0f;
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;

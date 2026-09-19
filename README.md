@@ -47,12 +47,12 @@ Unlike the Xiao build's on/off control, fan speed ramps proportionally between `
 ## ESP32-C3 OLED 0.42" build (`esp32_c3_oled_042`)
 
 - Generic ESP32-C3 board with an onboard 0.42" 72x40 SSD1306 OLED, powered from the printer display's USB-A port (5 V/GND only)
-- 10 kOhm NTC thermistor, Beta 3950
-- 10 kOhm fixed resistor
+- 100 kOhm NTC thermistor, Beta 3950
+- 100 kOhm fixed resistor
 - 2-wire 24 V fan (0.29 A @ 24 V), PWM speed-controlled through a 2N2222A NPN transistor (or BC337) on its ground return, with a 1N5819 Schottky across the fan
 - 2 momentary buttons for local setpoint adjustment and printer LED control
 
-Same PWM fan control and `#define` knobs as the touchscreen build, but with a compact four-line display and physical buttons. This board only has four GPIOs free of strapping/JTAG/UART duty, and all four are used: thermistor on `IO1`, transistor base (via 220 Ohm) on `IO10`, and the setpoint up/down buttons on `IO0` and `IO3`. The OLED occupies `IO8`/`IO9` internally.
+Same PWM fan control and `#define` knobs as the touchscreen build, but with a compact four-line display and physical buttons. This board only has four GPIOs free of strapping/JTAG/UART duty, and all four are used: thermistor on `IO1`, transistor base (via 220 Ohm) on `IO10`, and the setpoint up/down buttons on `IO0` and `IO3`. The OLED occupies `IO5`/`IO6` internally (the board reference says `IO8`/`IO9`; see the schematic doc if the panel stays blank).
 
 #### Printer LED toggle
 
