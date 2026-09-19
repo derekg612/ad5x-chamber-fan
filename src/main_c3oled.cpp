@@ -410,6 +410,12 @@ void handleSettings(AsyncWebServerRequest *request) {
 
 void setup() {
   Serial.begin(115200);
+  // Serial goes over the native USB. Once a host has read from it, it counts
+  // as connected for as long as the cable stays in, so after the monitor is
+  // closed -- or on a USB port nobody reads, like the printer's -- a full
+  // buffer would stall each print for up to two seconds, and the buttons with
+  // it. Drop what doesn't fit instead.
+  Serial.setTxTimeoutMs(0);
 #if FAN_PWM_ENABLED
   ledcAttach(FAN_PIN, FAN_PWM_FREQUENCY_HZ, FAN_PWM_RESOLUTION_BITS);
   ledcWrite(FAN_PIN, 0);
