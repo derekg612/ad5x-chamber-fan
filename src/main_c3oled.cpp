@@ -153,7 +153,9 @@ float readTemperatureC() {
   }
 
   const float voltage = (static_cast<float>(raw) / 4095.0f) * ADC_REFERENCE_VOLTS;
-  const float resistance = SERIES_RESISTOR_OHMS * voltage / (ADC_REFERENCE_VOLTS - voltage);
+  // The thermistor is the divider's high side (3V3 -> NTC -> pin -> fixed
+  // resistor -> GND), so the pin voltage rises as it warms.
+  const float resistance = SERIES_RESISTOR_OHMS * (ADC_REFERENCE_VOLTS - voltage) / voltage;
   const float steinhart = log(resistance / THERMISTOR_NOMINAL_OHMS) / THERMISTOR_BETA
       + 1.0f / (NOMINAL_TEMPERATURE_C + 273.15f);
   return 1.0f / steinhart - 273.15f;
